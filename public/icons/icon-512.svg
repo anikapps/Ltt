@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="LTT BD">
+  <defs>
+    <linearGradient id="bg" x1="40" y1="24" x2="470" y2="500" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4778FF"/><stop offset=".58" stop-color="#2450D2"/><stop offset="1" stop-color="#142E86"/>
+    </linearGradient>
+    <linearGradient id="route" x1="105" y1="365" x2="390" y2="130" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#8EF0D4"/><stop offset="1" stop-color="#FFFFFF"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <circle cx="256" cy="256" r="184" fill="#FFFFFF" fill-opacity=".055" stroke="#FFFFFF" stroke-opacity=".18" stroke-width="3"/>
+  <path d="M105 345C165 345 173 272 243 272C313 272 315 170 398 144" fill="none" stroke="#102D91" stroke-opacity=".28" stroke-width="36" stroke-linecap="round"/>
+  <path d="M105 345C165 345 173 272 243 272C313 272 315 170 398 144" fill="none" stroke="url(#route)" stroke-width="17" stroke-linecap="round"/>
+  <circle cx="105" cy="345" r="28" fill="#FFFFFF"/><circle cx="105" cy="345" r="12" fill="#20B99A"/>
+  <circle cx="398" cy="144" r="28" fill="#FFFFFF"/><circle cx="398" cy="144" r="12" fill="#20B99A"/>
+  <rect x="88" y="205" width="336" height="112" rx="30" fill="#102B78" fill-opacity=".92" stroke="#FFFFFF" stroke-opacity=".16" stroke-width="2"/>
+  <text x="256" y="283" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="86" font-weight="900" letter-spacing="-7" fill="#FFFFFF">LTT</text>
+  <rect x="194" y="339" width="124" height="48" rx="24" fill="#8EF0D4"/>
+  <text x="256" y="371" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="26" font-weight="900" letter-spacing="3" fill="#12336F">BD</text>
+</svg>
