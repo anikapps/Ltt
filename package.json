@@ -19,7 +19,7 @@
     "test:e2e": "node scripts/smoke-test-e2e.mjs"
   },
   "dependencies": {
-    "@supabase/ssr": "^0.6.1",
+    "@supabase/ssr": "^0.12.7",
     "@supabase/supabase-js": "^2.49.4",
     "exceljs": "^4.4.0",
     "leaflet": "^1.9.4",
