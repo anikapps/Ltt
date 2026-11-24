@@ -35,6 +35,7 @@ import {
 import GroupMap, { MapMarkerPerson } from '@/components/GroupMap';
 import RealQrCode from '@/components/RealQrCode';
 import BrandIdentity from '@/components/BrandIdentity';
+import { RealtimeGroupChat } from '@/components/RealtimeGroupChat';
 import {
   Trip,
   TripAdmin,
@@ -111,6 +112,7 @@ export default function AdminTripConsolePage() {
   const [adminChatChannel, setAdminChatChannel] = useState<'sos' | 'group'>('sos');
   const [selectedSosId, setSelectedSosId] = useState<string>('');
   const [adminSosReplyText, setAdminSosReplyText] = useState('');
+  const adminSosFeedRef = React.useRef<HTMLDivElement | null>(null);
 
   // Roster Upload state
   const [uploading, setUploading] = useState(false);
@@ -175,6 +177,12 @@ export default function AdminTripConsolePage() {
       setLoading(false);
     }
   }, [tripId]);
+
+  useEffect(() => {
+    if (adminSosFeedRef.current) {
+      adminSosFeedRef.current.scrollTop = adminSosFeedRef.current.scrollHeight;
+    }
+  }, [detail?.alerts]);
 
   useEffect(() => {
     loadDetail();
@@ -322,6 +330,8 @@ export default function AdminTripConsolePage() {
     .filter((p) => p.is_claimed)
     .map((p) => ({
       ...p,
+      is_me: false,
+      effective_status: p.effective_status === 'not_joined' ? ('unavailable' as const) : p.effective_status,
       hasActiveEmergency: activeEmergencySet.has(p.member_id),
       contactNumberAdmin: p.contact_number_admin
     }));
@@ -442,20 +452,63 @@ export default function AdminTripConsolePage() {
           </button>
           <button
             type="button"
+            onClick={() => {
+              const rows = [
+                ['Metric', 'Value'],
+                ['Trip Name', trip.name],
+                ['Status', trip.status],
+                ['Rostered Passengers', String(stats.rosterTotal)],
+                ['Joined Passengers', String(stats.registeredCount)],
+                ['Actively Sharing GPS', String(stats.sharingCount)],
+                ['Offline / Stale', String(stats.offlineCount)],
+                ['Active SOS Alerts', String(stats.activeAlertsCount)],
+                ['Total SOS Incidents', String(alerts.length)]
+              ];
+              const csv = rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\n');
+              const blob = new Blob([csv], { type: 'text/csv' });
+              const a = document.createElement('a');
+              a.href = URL.createObjectURL(blob);
+              a.download = `${trip.name.replace(/[^a-z0-9]+/gi, '_')}_BI_Report.csv`;
+              a.click();
+            }}
+            className="text-xs font-bold text-white bg-emerald-600/80 hover:bg-emerald-600 px-3 py-2 rounded-xl flex items-center gap-1.5"
+          >
+            <Download className="w-3.5 h-3.5" />
+            BI Report
+          </button>
+          <button
+            type="button"
             onClick={loadDetail}
             className="text-xs font-bold text-white bg-brand-600 hover:bg-brand-500 px-3 py-2 rounded-xl flex items-center gap-1.5"
           >
             <RefreshCw className="w-3.5 h-3.5" />
             Sync Live
           </button>
-          {trip.status !== 'completed' && (
+          {trip.status !== 'completed' && trip.status !== 'archived' ? (
+            <>
+              <button
+                type="button"
+                onClick={() => handlePostAction({ action: 'archive_trip' }, 'Trip archived.')}
+                className="text-xs font-bold text-white bg-slate-700 hover:bg-slate-600 px-3 py-2 rounded-xl"
+              >
+                Archive
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirmEndTrip(true)}
+                className="text-xs font-bold text-white bg-red-600 hover:bg-red-700 px-3.5 py-2 rounded-xl flex items-center gap-1.5 shadow-sm"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                End Trip &amp; Purge
+              </button>
+            </>
+          ) : (
             <button
               type="button"
-              onClick={() => setConfirmEndTrip(true)}
-              className="text-xs font-bold text-white bg-red-600 hover:bg-red-700 px-3.5 py-2 rounded-xl flex items-center gap-1.5 shadow-sm"
+              onClick={() => handlePostAction({ action: 'revive_trip' }, 'Tour revived with fresh invite link (old sessions revoked).')}
+              className="text-xs font-bold text-white bg-amber-600 hover:bg-amber-700 px-3.5 py-2 rounded-xl"
             >
-              <Trash2 className="w-3.5 h-3.5" />
-              End Trip &amp; Purge
+              Revive Tour
             </button>
           )}
         </div>
@@ -1270,6 +1323,11 @@ export default function AdminTripConsolePage() {
                                 setAdminNavMp(null);
                                 setAdminNavTarget({
                                   ...pax,
+                                  is_me: false,
+                                  effective_status:
+                                    pax.effective_status === 'not_joined'
+                                      ? ('unavailable' as const)
+                                      : pax.effective_status,
                                   contactNumberAdmin: pax.contact_number_admin
                                 });
                               }}
@@ -1517,9 +1575,12 @@ export default function AdminTripConsolePage() {
                         </div>
 
                         {/* Message Feed */}
-                        <div className="flex-1 p-4 space-y-3 overflow-y-auto max-h-80">
+                        <div ref={adminSosFeedRef} className="flex-1 p-4 space-y-3 overflow-y-auto max-h-80">
                           {(currentSosAlert.messages || []).map((m) => {
-                            const isStaff = m.sender_role === 'organizer' || m.sender_role === 'responder';
+                            const isStaff =
+                              m.sender_role === 'admin' ||
+                              m.sender_role === 'organizer' ||
+                              m.sender_role === 'responder';
                             return (
                               <div
                                 key={m.id}
@@ -1597,129 +1658,25 @@ export default function AdminTripConsolePage() {
                 </div>
               )}
 
-              {/* CHANNEL 2: GROUP & TOUR LEADER CHAT */}
+              {/* CHANNEL 2: GROUP & TOUR LEADER CHAT (Same fast Realtime UI as Guest Chat) */}
               {adminChatChannel === 'group' && (
-                <div className="bg-slate-900/90 rounded-2xl border border-white/15 overflow-hidden flex flex-col">
-                  <div className="p-3.5 bg-navy-950/70 border-b border-white/10 flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex items-center gap-1.5 overflow-x-auto">
-                      {[
-                        'Please proceed to the scheduled meeting point in 15 minutes.',
-                        'The coach is ready for boarding. Please follow your tour leader’s instructions.',
-                        'Please complete the active roll call check-in.',
-                        'Please check your itinerary for the next group meal time and venue.'
-                      ].map((preset) => (
-                        <button
-                          key={preset}
-                          type="button"
-                          onClick={() =>
-                            handlePostAction(
-                              {
-                                action: 'send_group_chat',
-                                message: preset,
-                                latitude: adminOriginLat,
-                                longitude: adminOriginLng
-                              },
-                              'Broadcast sent to group chat.'
-                            )
-                          }
-                          className="text-[11px] font-bold bg-slate-800 hover:bg-brand-600 text-teal-200 hover:text-white px-3 py-1.5 rounded-full whitespace-nowrap border border-slate-700 transition"
-                        >
-                          {preset}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="p-4 space-y-3 max-h-96 overflow-y-auto">
-                    {groupMessages.map((msg) => {
-                      const isStaff = msg.sender_role === 'organizer' || msg.sender_role === 'responder';
-                      return (
-                        <div
-                          key={msg.id}
-                          className={`flex flex-col ${isStaff ? 'items-end' : 'items-start'}`}
-                        >
-                          <div
-                            className={`max-w-[80%] rounded-2xl px-4 py-3 text-xs space-y-1 shadow-lg ${
-                              isStaff
-                                ? 'bg-gradient-to-r from-amber-500/20 to-teal-500/20 border border-amber-400/50 text-white'
-                                : 'bg-slate-800 text-slate-100 border border-slate-700'
-                            }`}
-                          >
-                            <div className="flex items-center justify-between gap-4 text-[10px]">
-                              <span className="font-extrabold text-gold-400">
-                                {msg.sender_name} ({msg.sender_code || 'TB'})
-                                {isStaff && (
-                                  <span className="ml-1.5 bg-gold-400 text-navy-950 px-1.5 py-0.2 rounded font-extrabold">
-                                    OPERATIONS
-                                  </span>
-                                )}
-                              </span>
-                              <span className="text-slate-300">
-                                {new Date(msg.created_at).toLocaleTimeString([], {
-                                  hour: '2-digit',
-                                  minute: '2-digit'
-                                })}
-                              </span>
-                            </div>
-                            <p className="leading-relaxed text-sm">{msg.message}</p>
-                            {typeof msg.latitude === 'number' && typeof msg.longitude === 'number' && (
-                              <div className="pt-1">
-                                <a
-                                  href={buildGoogleMapsDirectionsUrl({
-                                    originLat: adminOriginLat,
-                                    originLng: adminOriginLng,
-                                    destLat: msg.latitude,
-                                    destLng: msg.longitude,
-                                    travelMode: 'walking'
-                                  })}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="inline-flex items-center gap-1 text-[10px] font-extrabold bg-white/15 hover:bg-white/25 text-teal-200 px-2.5 py-1 rounded-lg"
-                                >
-                                  <Navigation className="w-3 h-3" />
-                                  Open Shared GPS Pin in Google Maps
-                                </a>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-
-                  <form
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      if (!adminChatText.trim()) return;
-                      handlePostAction(
-                        {
-                          action: 'send_group_chat',
-                          message: adminChatText,
-                          latitude: adminOriginLat,
-                          longitude: adminOriginLng
-                        },
-                        'Message posted to group chat.'
-                      );
-                      setAdminChatText('');
-                    }}
-                    className="p-3.5 bg-navy-950 border-t border-white/10 flex items-center gap-2"
-                  >
-                    <input
-                      type="text"
-                      placeholder="Send an official Operations message to all tourists..."
-                      value={adminChatText}
-                      onChange={(e) => setAdminChatText(e.target.value)}
-                      className="flex-1 rounded-xl bg-slate-900 border border-slate-700 px-4 py-3 text-xs text-white placeholder-slate-400"
-                    />
-                    <button
-                      type="submit"
-                      className="bg-brand-500 hover:bg-brand-600 text-white font-extrabold text-xs px-5 py-3 rounded-xl flex items-center gap-1.5 shadow-lg"
-                    >
-                      <Send className="w-4 h-4" />
-                      Send as Operations
-                    </button>
-                  </form>
-                </div>
+                <RealtimeGroupChat
+                  tripId={tripId}
+                  tripName={trip.name}
+                  role="admin"
+                  senderId="admin-ops"
+                  senderName="LTT BD Operations"
+                  senderCode="STAFF"
+                  initialMessages={groupMessages}
+                  peerCount={stats.registeredCount}
+                  onRefreshSync={loadDetail}
+                  presets={[
+                    'Please proceed to the scheduled meeting point in 15 minutes.',
+                    'The coach is ready for boarding. Please follow your tour leader.',
+                    'Please complete the active roll call check-in.',
+                    'Please check your itinerary for the next group meal time and venue.'
+                  ]}
+                />
               )}
             </div>
           );
@@ -1985,7 +1942,8 @@ export default function AdminTripConsolePage() {
                       title: annTitle,
                       body: annBody,
                       subgroupName: annSubgroup,
-                      priority: annPriority
+                      priority: annPriority,
+                      destinations: ['essentials', 'notifications', 'push', 'chat']
                     },
                     'Announcement published to tourists.'
                   );

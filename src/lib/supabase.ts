@@ -1,25 +1,52 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
+export function getSupabaseUrl(): string {
+  return (process.env.NEXT_PUBLIC_SUPABASE_URL || '').trim().replace(/\/+$/, '');
+}
+
+/**
+ * Supports both new Supabase Publishable Keys (`sb_publishable_...`)
+ * and legacy `anon` public keys.
+ */
+export function getSupabasePublicKey(): string {
+  return (
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+    ''
+  ).trim();
+}
+
+/**
+ * Supports both new Supabase Secret Keys (`sb_secret_...`)
+ * and legacy `service_role` secret keys. Server-only.
+ */
+export function getSupabaseSecretKey(): string {
+  return (
+    process.env.SUPABASE_SECRET_KEY ||
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    ''
+  ).trim();
+}
+
 export function isSupabaseConfigured(): boolean {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+  const url = getSupabaseUrl();
+  const secretKey = getSupabaseSecretKey();
   return (
     url.startsWith('https://') &&
     !url.includes('your-project-id') &&
-    serviceKey.length > 20 &&
-    !serviceKey.includes('your-supabase-service-role')
+    secretKey.length > 20 &&
+    !secretKey.includes('your-supabase-service-role') &&
+    !secretKey.includes('your-supabase-secret')
   );
 }
 
 /**
- * Server-only Supabase client using Service Role key.
+ * Server-only Supabase client using Secret / Service Role key.
  * NEVER import this into client components.
  */
 export function getSupabaseAdminClient(): SupabaseClient | null {
   if (!isSupabaseConfigured()) return null;
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-  return createClient(url, serviceKey, {
+  return createClient(getSupabaseUrl(), getSupabaseSecretKey(), {
     auth: {
       persistSession: false,
       autoRefreshToken: false
@@ -28,18 +55,25 @@ export function getSupabaseAdminClient(): SupabaseClient | null {
 }
 
 /**
- * Browser-safe Supabase client for Realtime subscriptions when configured.
+ * Browser-safe Supabase client for Realtime Broadcast & Presence.
  */
 export function getSupabaseBrowserClient(): SupabaseClient | null {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
-  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
+  const url = getSupabaseUrl();
+  const pubKey = getSupabasePublicKey();
   if (
     !url.startsWith('https://') ||
     url.includes('your-project-id') ||
-    anonKey.length < 20 ||
-    anonKey.includes('your-supabase-anon')
+    pubKey.length < 20 ||
+    pubKey.includes('your-supabase-anon') ||
+    pubKey.includes('your-supabase-publishable')
   ) {
     return null;
   }
-  return createClient(url, anonKey);
+  return createClient(url, pubKey, {
+    realtime: {
+      params: {
+        eventsPerSecond: 10
+      }
+    }
+  });
 }

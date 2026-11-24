@@ -8,7 +8,7 @@ import {
 import { getSupabaseAdminClient } from '@/lib/supabase';
 
 export async function GET() {
-  const session = getAdminSessionFromCookies();
+  const session = await getAdminSessionFromCookies();
   if (!session) {
     return NextResponse.json({ authenticated: false }, { status: 401 });
   }
@@ -29,8 +29,9 @@ export async function POST(req: NextRequest) {
     }
 
     const sb = getSupabaseAdminClient();
+    let userId: string | undefined;
     let adminName = 'LTT BD Administrator';
-    let role: 'super_admin' | 'admin' | 'tour_leader' = 'super_admin';
+    let role: AdminSessionPayload['role'] = 'super_admin';
 
     if (sb) {
       const { data, error } = await sb.auth.signInWithPassword({ email, password });
@@ -40,22 +41,54 @@ export async function POST(req: NextRequest) {
           { status: 401 }
         );
       }
+
+      userId = data.user.id;
       adminName = data.user.user_metadata?.full_name || email;
+
+      // Resolve authoritative RBAC role from public.profiles if present
+      const { data: profile } = await sb
+        .from('profiles')
+        .select('full_name, role')
+        .eq('id', data.user.id)
+        .maybeSingle();
+
+      if (profile) {
+        adminName = profile.full_name || adminName;
+        if (profile.role === 'tourist') {
+          return NextResponse.json(
+            { error: 'This account does not have operations administrator access.' },
+            { status: 403 }
+          );
+        }
+        role = profile.role as AdminSessionPayload['role'];
+      } else {
+        // Bootstrap profile for authenticated Supabase Auth operator if missing
+        await sb.from('profiles').upsert({
+          id: data.user.id,
+          email,
+          full_name: adminName,
+          role: 'super_admin'
+        });
+      }
+
+      await sb.from('audit_logs').insert({
+        trip_id: null,
+        actor_label: `${adminName} (${email})`,
+        action: 'ADMIN_LOGIN',
+        details: { role }
+      });
     } else {
-      // Local mode requires a private credential generated during setup. There is
-      // no shared demo password or hard-coded production fallback.
       const configuredEmail = process.env.LTTBD_DEFAULT_ADMIN_EMAIL || process.env.TOURBUZZ_DEFAULT_ADMIN_EMAIL;
       const configuredPassword = process.env.LTTBD_DEFAULT_ADMIN_PASSWORD || process.env.TOURBUZZ_DEFAULT_ADMIN_PASSWORD;
 
       if (!configuredEmail || !configuredPassword) {
         return NextResponse.json(
-          { error: 'Administrator authentication is not configured. Run the setup script or configure Supabase Auth.' },
+          { error: 'Administrator authentication is not configured. Run setup or configure Supabase Auth.' },
           { status: 503 }
         );
       }
 
-      const expectedEmail = configuredEmail.toLowerCase();
-      if (email !== expectedEmail || password !== configuredPassword) {
+      if (email !== configuredEmail.toLowerCase() || password !== configuredPassword) {
         return NextResponse.json(
           { error: 'Invalid administrator credentials.' },
           { status: 401 }
@@ -66,6 +99,7 @@ export async function POST(req: NextRequest) {
     }
 
     const payload: AdminSessionPayload = {
+      userId,
       email,
       name: adminName,
       role,
@@ -79,7 +113,7 @@ export async function POST(req: NextRequest) {
       sameSite: 'lax',
       secure: process.env.NODE_ENV === 'production',
       path: '/',
-      maxAge: 60 * 60 * 12 // 12 hours
+      maxAge: 60 * 60 * 12
     });
     return res;
   } catch {
@@ -88,6 +122,16 @@ export async function POST(req: NextRequest) {
 }
 
 export async function DELETE() {
+  const session = await getAdminSessionFromCookies();
+  const sb = getSupabaseAdminClient();
+  if (sb && session) {
+    await sb.from('audit_logs').insert({
+      trip_id: null,
+      actor_label: `${session.name} (${session.email})`,
+      action: 'ADMIN_LOGOUT',
+      details: { role: session.role }
+    });
+  }
   const res = NextResponse.json({ authenticated: false });
   res.cookies.delete(ADMIN_COOKIE_NAME);
   return res;

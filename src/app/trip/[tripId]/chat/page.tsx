@@ -1,454 +1,379 @@
 'use client';
 
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
-import MinimalNav from '@/components/MinimalNav';
-import {
-  ArrowLeft,
-  MessageSquare,
-  Send,
-  ShieldAlert,
-  Phone,
-  MapPin,
-  CheckCircle2,
-  Building2,
-  Sparkles
-} from 'lucide-react';
-import {
-  SafeTouristPeer,
-  EmergencyAlert,
-  GroupChatMessage,
-  TripEssentialHub
-} from '@/types/lttbd';
-import { buildGoogleMapsDirectionsUrl } from '@/lib/geo';
+import { CheckCircle2, MessageCircle, ShieldAlert, Send, Phone, XCircle } from 'lucide-react';
+import { MinimalNav } from '@/components/MinimalNav';
+import { RealtimeGroupChat } from '@/components/RealtimeGroupChat';
+import { useTripRealtime } from '@/lib/realtime';
+import type { EmergencyAlert, GroupChatMessage } from '@/types/lttbd';
 
-interface ChatStateResponse {
-  trip: {
-    id: string;
-    name: string;
-    destination: string;
-    organizer_contact?: string;
-    essentials?: TripEssentialHub;
-  };
-  me: SafeTouristPeer | null;
-  groupMessages?: GroupChatMessage[];
-  myAlerts: EmergencyAlert[];
-}
-
-const QUICK_OPERATION_CHIPS = [
-  '🚨 Please call me at my registered number',
-  '📍 I am waiting at my current GPS pin',
-  '🏨 I am heading back to the Group Hotel',
-  '🚌 Where is the tour bus parked?',
-  '✅ I am safe and back with the group'
-];
-
-export default function TouristOperationsChatPage() {
+export default function GuestChatAndSosPage() {
   const params = useParams<{ tripId: string }>();
   const router = useRouter();
   const tripId = params.tripId;
 
-  const [state, setState] = useState<ChatStateResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [activeChannel, setActiveChannel] = useState<'sos' | 'group'>('sos');
+  const [tab, setTab] = useState<'sos' | 'group'>('group');
+  const [tripName, setTripName] = useState('Group Chat');
+  const [organizerContact, setOrganizerContact] = useState('');
+  const [me, setMe] = useState<{ id: string; tourist_code: string; display_name: string } | null>(null);
+  const [peerCount, setPeerCount] = useState(0);
+  const [groupMessages, setGroupMessages] = useState<GroupChatMessage[]>([]);
+  const [myAlerts, setMyAlerts] = useState<EmergencyAlert[]>([]);
+  const [selectedAlertId, setSelectedAlertId] = useState<string>('');
+  const [sosReply, setSosReply] = useState('');
+  const [closingSos, setClosingSos] = useState(false);
 
-  const [sosMessageText, setSosMessageText] = useState('');
-  const [groupMessageText, setGroupMessageText] = useState('');
-  const [attachGps, setAttachGps] = useState(true);
-  const [sending, setSending] = useState(false);
+  const sosBottomRef = useRef<HTMLDivElement | null>(null);
 
-  const feedEndRef = useRef<HTMLDivElement | null>(null);
-
-  const fetchChatState = useCallback(async () => {
-    try {
-      const res = await fetch(`/api/tourist/trip/${tripId}`);
-      if (res.status === 401) {
-        router.push('/');
-        return;
-      }
-      if (!res.ok) return;
-      const data = (await res.json()) as ChatStateResponse;
-      setState(data);
-    } finally {
-      setLoading(false);
+  const loadData = useCallback(async () => {
+    const res = await fetch(`/api/tourist/trip/${tripId}`);
+    if (res.status === 401) {
+      router.push('/join');
+      return;
     }
-  }, [tripId, router]);
+    if (!res.ok) return;
+    const data = await res.json();
+    setTripName(data.trip?.name || 'Group Chat');
+    setOrganizerContact(data.trip?.organizer_contact || '');
+    setMe(data.me);
+    setPeerCount((data.peers || []).length);
+    setGroupMessages(data.groupMessages || []);
+    setMyAlerts(data.myAlerts || []);
+    if (!selectedAlertId && data.myAlerts?.[0]?.id) {
+      setSelectedAlertId(data.myAlerts[0].id);
+    }
+  }, [tripId, router, selectedAlertId]);
 
   useEffect(() => {
-    fetchChatState();
-    const timer = setInterval(fetchChatState, 4000);
+    if (typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('sos') === '1') {
+      setTab('sos');
+    }
+    loadData();
+  }, [loadData]);
+
+  // Fast 2-second poll while on SOS tab so admin acknowledgements & replies appear immediately
+  useEffect(() => {
+    if (tab !== 'sos') return;
+    const timer = setInterval(loadData, 2000);
     return () => clearInterval(timer);
-  }, [fetchChatState]);
+  }, [tab, loadData]);
 
-  const activeAlert = state?.myAlerts.find(
-    (a) => a.status !== 'resolved' && a.status !== 'Resolved' && a.status !== 'Closed' && a.status !== 'Cancelled'
-  ) || state?.myAlerts[0] || null;
+  const { broadcastEvent } = useTripRealtime({
+    tripId,
+    memberId: me?.id,
+    displayName: me?.display_name,
+    onEvent: (evt) => {
+      if (evt.type === 'sos_reply') {
+        loadData();
+      }
+    }
+  });
 
+  const activeAlert = myAlerts.find((a) => a.id === selectedAlertId) || myAlerts[0];
+  const isClosedOrResolved = activeAlert
+    ? ['resolved', 'Resolved', 'Closed', 'Cancelled'].includes(activeAlert.status)
+    : false;
+  const isAcknowledged = activeAlert
+    ? ['Acknowledged', 'Assigned', 'Responding', 'responding'].includes(activeAlert.status)
+    : false;
+
+  // Auto-scroll SOS thread smoothly whenever new messages arrive
   useEffect(() => {
-    if (!loading && !activeAlert) {
-      setActiveChannel('group');
-    }
-  }, [loading, activeAlert]);
+    requestAnimationFrame(() => {
+      sosBottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    });
+  }, [activeAlert?.messages?.length, tab]);
 
-  const handleSendSosReply = async (presetText?: string) => {
-    const msg = (presetText ?? sosMessageText).trim();
-    if (!msg || !activeAlert) return;
-    setSending(true);
-    try {
-      await fetch(`/api/tourist/trip/${tripId}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'send_alert_message',
-          alertId: activeAlert.id,
-          message: msg
-        })
-      });
-      if (!presetText) setSosMessageText('');
-      await fetchChatState();
-      feedEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    } finally {
-      setSending(false);
-    }
-  };
+  async function sendSosReplyText(rawText: string) {
+    const text = rawText.trim();
+    if (!activeAlert || !text || !me) return;
 
-  const handleSendGroupMessage = async (presetText?: string) => {
-    const msg = (presetText ?? groupMessageText).trim();
-    if (!msg) return;
-    setSending(true);
-    try {
-      await fetch(`/api/tourist/trip/${tripId}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'send_group_chat',
-          message: msg,
-          latitude: attachGps ? state?.me?.latitude : null,
-          longitude: attachGps ? state?.me?.longitude : null
-        })
-      });
-      if (!presetText) setGroupMessageText('');
-      await fetchChatState();
-      feedEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    } finally {
-      setSending(false);
-    }
-  };
+    const tempMsg = {
+      id: `temp-${crypto.randomUUID()}`,
+      sender_role: 'tourist' as const,
+      sender_name: me.display_name,
+      message: text,
+      created_at: new Date().toISOString()
+    };
+    setMyAlerts((prev) =>
+      prev.map((a) => (a.id === activeAlert.id ? { ...a, messages: [...(a.messages || []), tempMsg] } : a))
+    );
+    setSosReply('');
 
-  const handleCancelSos = async (alertId: string) => {
     await fetch(`/api/tourist/trip/${tripId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'cancel_emergency', alertId })
+      body: JSON.stringify({
+        action: 'reply_sos',
+        alertId: activeAlert.id,
+        message: text
+      })
     });
-    await fetchChatState();
-  };
-
-  if (loading || !state) {
-    return (
-      <div className="flex-1 flex items-center justify-center p-6 text-sm text-slate-500">
-        Connecting to LTT BD group chat...
-      </div>
-    );
+    broadcastEvent({ type: 'sos_reply', alertId: activeAlert.id, message: tempMsg });
+    loadData();
   }
 
-  const { trip, me, groupMessages = [] } = state;
+  async function handleCloseSos() {
+    if (!activeAlert) return;
+    setClosingSos(true);
+    try {
+      await fetch(`/api/tourist/trip/${tripId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'close_sos', alertId: activeAlert.id })
+      });
+      await loadData();
+    } finally {
+      setClosingSos(false);
+    }
+  }
+
+  const activeSosCount = myAlerts.filter(
+    (a) => !['resolved', 'Resolved', 'Closed', 'Cancelled'].includes(a.status)
+  ).length;
 
   return (
-    <div className="ltt-chat-page flex-1 flex flex-col bg-navy-950 text-white min-h-screen">
+    <div className="min-h-screen bg-slate-950 flex flex-col">
       <MinimalNav
+        role="tourist"
         tripId={tripId}
-        tripName={trip.name}
-        touristLabel={me ? `${me.display_name} (${me.tourist_code}) • Operations Chat` : 'Operations Chat'}
+        tripName={tripName}
+        userName={me ? `${me.display_name} (${me.tourist_code})` : ''}
         chatCount={groupMessages.length}
-        hasActiveSos={Boolean(activeAlert)}
+        hasActiveSos={activeSosCount > 0}
       />
 
-      <div className="max-w-4xl w-full mx-auto p-4 flex-1 flex flex-col gap-4">
-        {/* Channel Switcher: Direct SOS Operations Desk vs. Group Lounge */}
-        <div className="grid grid-cols-2 gap-2 bg-navy-900 p-1.5 rounded-2xl border border-white/10">
+      <main className="max-w-5xl w-full mx-auto px-3 sm:px-6 py-4 space-y-4 flex-1">
+        {/* Matching Dark Operations Desk Pill Switcher */}
+        <div className="grid grid-cols-2 bg-slate-900 p-1.5 rounded-2xl border border-white/10 gap-1.5">
           <button
             type="button"
-            onClick={() => setActiveChannel('sos')}
-            className={`py-2.5 px-3 rounded-xl text-xs font-extrabold flex items-center justify-center gap-2 transition ${
-              activeChannel === 'sos'
-                ? 'bg-gradient-to-r from-red-600 to-amber-600 text-white shadow-lg'
-                : 'text-slate-400 hover:text-white'
+            onClick={() => setTab('sos')}
+            className={`inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-xs sm:text-sm font-extrabold transition ${
+              tab === 'sos'
+                ? 'bg-gradient-to-r from-rose-600 to-amber-500 text-white shadow-lg'
+                : 'text-slate-300 hover:bg-white/5'
             }`}
           >
-            <ShieldAlert className="w-4 h-4" />
-            Direct SOS &amp; Operations Desk
-            {activeAlert && (
-              <span className="bg-white text-red-700 px-2 py-0.5 rounded-full text-[10px] font-extrabold">
-                {activeAlert.status}
-              </span>
-            )}
+            <ShieldAlert className="w-4 h-4" /> Direct SOS &amp; Operations ({activeSosCount} Active)
           </button>
-
           <button
             type="button"
-            onClick={() => setActiveChannel('group')}
-            className={`py-2.5 px-3 rounded-xl text-xs font-extrabold flex items-center justify-center gap-2 transition ${
-              activeChannel === 'group'
-                ? 'bg-gradient-to-r from-brand-600 to-teal-600 text-white shadow-lg'
-                : 'text-slate-400 hover:text-white'
+            onClick={() => setTab('group')}
+            className={`inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-xs sm:text-sm font-extrabold transition ${
+              tab === 'group'
+                ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-lg'
+                : 'text-slate-300 hover:bg-white/5'
             }`}
           >
-            <MessageSquare className="w-4 h-4" />
-            Group &amp; Tour Leader Chat ({groupMessages.length})
+            <MessageCircle className="w-4 h-4" /> Group &amp; Tour Leader Chat ({groupMessages.length})
           </button>
         </div>
 
-        {/* CHANNEL 1: DIRECT SOS & OPERATIONS DESK CHAT */}
-        {activeChannel === 'sos' && (
-          <div className="flex-1 flex flex-col bg-slate-900/90 rounded-3xl border border-red-500/40 shadow-2xl overflow-hidden">
-            {activeAlert ? (
-              <>
-                {/* Incident Status Header */}
-                <div className="bg-gradient-to-r from-red-900/80 via-red-800/80 to-navy-900 p-4 border-b border-red-500/30 flex flex-wrap items-center justify-between gap-3">
-                  <div className="space-y-1">
-                    <div className="flex items-center gap-2">
-                      <span className="px-2.5 py-0.5 rounded-full text-[10px] font-extrabold uppercase bg-amber-400 text-navy-950">
-                        Priority: {activeAlert.priority || 'High'}
-                      </span>
-                      <span className="px-2.5 py-0.5 rounded-full text-[10px] font-extrabold uppercase bg-white/20 text-white">
-                        Status: {activeAlert.status}
-                      </span>
-                    </div>
-                    <h2 className="text-sm font-extrabold text-white">
-                      {activeAlert.category}
-                    </h2>
-                    <p className="text-[11px] text-red-200">
-                      {activeAlert.assigned_responder
-                        ? `Assigned Responder: ${activeAlert.assigned_responder}`
-                        : 'Operations Command Centre is monitoring your live GPS location.'}
-                    </p>
-                  </div>
-
-                  {activeAlert.status !== 'Resolved' && activeAlert.status !== 'Cancelled' && (
-                    <button
-                      type="button"
-                      onClick={() => handleCancelSos(activeAlert.id)}
-                      className="text-xs font-bold bg-white/15 hover:bg-white/25 text-white px-3 py-1.5 rounded-xl border border-white/20"
-                    >
-                      Mark Safe / Cancel SOS
-                    </button>
-                  )}
+        {tab === 'group' && me ? (
+          <RealtimeGroupChat
+            tripId={tripId}
+            tripName={tripName}
+            role="tourist"
+            senderId={me.id}
+            senderName={me.display_name}
+            senderCode={me.tourist_code}
+            initialMessages={groupMessages}
+            peerCount={peerCount}
+            presets={[
+              'On my way to the meeting point!',
+              'Reached the hotel lobby.',
+              'Running 5 minutes late.'
+            ]}
+            onRefreshSync={loadData}
+          />
+        ) : tab === 'sos' ? (
+          <div className="space-y-3">
+            {activeAlert && !isClosedOrResolved && (
+              <div className="rounded-2xl bg-gradient-to-r from-rose-700 to-amber-600 text-white px-4 py-3 flex flex-wrap items-center justify-between gap-2 shadow-lg">
+                <div className="text-xs sm:text-sm font-extrabold tracking-wide">
+                  🚨 URGENT EMERGENCY ASSISTANCE REQUESTED — {isAcknowledged ? 'Acknowledged by Operations' : 'Waiting for Operations'}
                 </div>
-
-                {/* Quick Chips */}
-                <div className="px-4 py-2.5 bg-navy-950/60 border-b border-white/10 flex items-center gap-1.5 overflow-x-auto">
-                  {QUICK_OPERATION_CHIPS.map((chip) => (
-                    <button
-                      key={chip}
-                      type="button"
-                      onClick={() => handleSendSosReply(chip)}
-                      className="text-[11px] font-bold bg-slate-800 hover:bg-red-600 text-slate-200 hover:text-white px-3 py-1.5 rounded-full whitespace-nowrap border border-slate-700 transition"
-                    >
-                      {chip}
-                    </button>
-                  ))}
-                </div>
-
-                {/* Direct Operations Message Thread */}
-                <div className="flex-1 p-4 space-y-3 overflow-y-auto max-h-[420px]">
-                  {(activeAlert.messages || []).map((m) => {
-                    const isStaff = m.sender_role === 'organizer' || m.sender_role === 'responder';
-                    return (
-                      <div
-                        key={m.id}
-                        className={`flex flex-col ${isStaff ? 'items-start' : 'items-end'}`}
-                      >
-                        <div
-                          className={`max-w-[82%] rounded-2xl px-4 py-3 text-xs space-y-1 shadow-lg ${
-                            isStaff
-                              ? 'bg-gradient-to-r from-amber-500/25 to-red-500/25 border border-amber-400/50 text-white'
-                              : 'bg-brand-600 text-white'
-                          }`}
-                        >
-                          <div className="flex items-center justify-between gap-4 text-[10px]">
-                            <span className="font-extrabold text-gold-400">
-                              {m.sender_name}
-                              {isStaff && (
-                                <span className="ml-1.5 bg-gold-400 text-navy-950 px-1.5 py-0.2 rounded font-extrabold">
-                                  OPERATIONS DESK
-                                </span>
-                              )}
-                            </span>
-                            <span className="text-slate-300">
-                              {new Date(m.created_at).toLocaleTimeString([], {
-                                hour: '2-digit',
-                                minute: '2-digit'
-                              })}
-                            </span>
-                          </div>
-                          <p className="leading-relaxed text-sm">{m.message}</p>
-                        </div>
-                      </div>
-                    );
-                  })}
-                  <div ref={feedEndRef} />
-                </div>
-
-                {/* Composer */}
-                <form
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    handleSendSosReply();
-                  }}
-                  className="p-3.5 bg-navy-950 border-t border-white/10 flex items-center gap-2"
-                >
-                  <input
-                    type="text"
-                    placeholder="Type a direct message to Operations & Responder..."
-                    value={sosMessageText}
-                    onChange={(e) => setSosMessageText(e.target.value)}
-                    className="flex-1 rounded-xl bg-slate-900 border border-slate-700 px-4 py-3 text-xs text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-red-500"
-                  />
-                  <button
-                    type="submit"
-                    disabled={sending}
-                    className="bg-red-600 hover:bg-red-700 text-white font-extrabold text-xs px-5 py-3 rounded-xl flex items-center gap-1.5 shadow-lg"
-                  >
-                    <Send className="w-4 h-4" />
-                    Send to Operations
-                  </button>
-                </form>
-              </>
-            ) : (
-              <div className="p-8 text-center space-y-3 my-auto">
-                <CheckCircle2 className="w-10 h-10 text-emerald-400 mx-auto" />
-                <h3 className="text-sm font-extrabold text-white">No Active Emergency SOS</h3>
-                <p className="text-xs text-slate-400 max-w-md mx-auto">
-                  You do not have an open SOS alert right now. Switch to the Group &amp; Tour Leader Chat tab to message everyone, or return to the Live Map to trigger an SOS if you need urgent help.
-                </p>
-                <button
-                  type="button"
-                  onClick={() => setActiveChannel('group')}
-                  className="bg-brand-600 text-white text-xs font-extrabold px-4 py-2.5 rounded-xl"
-                >
-                  Switch to Group &amp; Tour Leader Chat
-                </button>
+                {activeAlert.assigned_responder && (
+                  <span className="text-xs font-bold bg-black/25 px-3 py-1 rounded-full">
+                    Assigned: {activeAlert.assigned_responder}
+                  </span>
+                )}
               </div>
             )}
-          </div>
-        )}
 
-        {/* CHANNEL 2: GROUP & TOUR LEADER CHAT */}
-        {activeChannel === 'group' && (
-          <div className="flex-1 flex flex-col bg-slate-900/90 rounded-3xl border border-white/15 shadow-2xl overflow-hidden">
-            <div className="p-3.5 bg-navy-950/70 border-b border-white/10 flex flex-wrap items-center justify-between gap-2">
-              <div className="flex items-center gap-1.5 overflow-x-auto">
-                {QUICK_OPERATION_CHIPS.map((chip) => (
-                  <button
-                    key={chip}
-                    type="button"
-                    onClick={() => handleSendGroupMessage(chip)}
-                    className="text-[11px] font-bold bg-slate-800 hover:bg-brand-600 text-slate-200 hover:text-white px-3 py-1.5 rounded-full whitespace-nowrap border border-slate-700 transition"
-                  >
-                    {chip}
-                  </button>
-                ))}
-              </div>
-              <label className="flex items-center gap-1.5 text-[11px] text-teal-300 font-bold cursor-pointer shrink-0">
-                <input
-                  type="checkbox"
-                  checked={attachGps}
-                  onChange={(e) => setAttachGps(e.target.checked)}
-                  className="rounded border-slate-600"
-                />
-                Attach My GPS Pin
-              </label>
-            </div>
-
-            <div className="flex-1 p-4 space-y-3 overflow-y-auto max-h-[440px]">
-              {groupMessages.map((msg) => {
-                const isMine = msg.sender_id === me?.member_id;
-                const isStaff = msg.sender_role === 'organizer' || msg.sender_role === 'responder';
-                return (
-                  <div
-                    key={msg.id}
-                    className={`flex flex-col ${isMine ? 'items-end' : 'items-start'}`}
-                  >
-                    <div
-                      className={`max-w-[82%] rounded-2xl px-4 py-3 text-xs space-y-1 shadow-lg ${
-                        isStaff
-                          ? 'bg-gradient-to-r from-amber-500/20 to-teal-500/20 border border-amber-400/50 text-white'
-                          : isMine
-                          ? 'bg-brand-600 text-white'
-                          : 'bg-slate-800 text-slate-100 border border-slate-700'
+            <div className="grid lg:grid-cols-12 gap-4">
+              {/* Left Thread List */}
+              <div className="lg:col-span-4 bg-slate-900/90 rounded-2xl border border-white/10 p-4 space-y-2.5">
+                <div className="text-xs font-extrabold uppercase tracking-wider text-slate-400">
+                  Your SOS Threads ({myAlerts.length})
+                </div>
+                {myAlerts.length === 0 ? (
+                  <div className="text-xs text-slate-400 py-6 text-center">
+                    No SOS alerts sent. Use the red <strong>I NEED HELP (SOS)</strong> banner above if you need assistance.
+                  </div>
+                ) : (
+                  myAlerts.map((a) => (
+                    <button
+                      key={a.id}
+                      type="button"
+                      onClick={() => setSelectedAlertId(a.id)}
+                      className={`w-full text-left rounded-xl p-3 border transition ${
+                        activeAlert?.id === a.id
+                          ? 'bg-rose-950/60 border-rose-500/60 text-white'
+                          : 'bg-slate-950/60 border-white/10 text-slate-300 hover:border-white/25'
                       }`}
                     >
-                      <div className="flex items-center justify-between gap-4 text-[10px]">
-                        <span className="font-extrabold text-gold-400">
-                          {msg.sender_name}
-                          {isStaff && (
-                            <span className="ml-1.5 bg-gold-400 text-navy-950 px-1.5 py-0.2 rounded font-extrabold">
-                              OPERATIONS
-                            </span>
-                          )}
-                        </span>
-                        <span className="text-slate-400">
-                          {new Date(msg.created_at).toLocaleTimeString([], {
-                            hour: '2-digit',
-                            minute: '2-digit'
-                          })}
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-extrabold">{a.category}</span>
+                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full text-white ${
+                          ['resolved', 'Resolved', 'Closed', 'Cancelled'].includes(a.status)
+                            ? 'bg-emerald-600'
+                            : ['Acknowledged', 'Assigned', 'Responding'].includes(a.status)
+                            ? 'bg-amber-500 text-slate-950'
+                            : 'bg-rose-600'
+                        }`}>
+                          {a.status}
                         </span>
                       </div>
-                      <p className="leading-relaxed text-sm">{msg.message}</p>
-                      {typeof msg.latitude === 'number' && typeof msg.longitude === 'number' && (
-                        <div className="pt-1">
-                          <a
-                            href={buildGoogleMapsDirectionsUrl({
-                              originLat: me?.latitude,
-                              originLng: me?.longitude,
-                              destLat: msg.latitude,
-                              destLng: msg.longitude,
-                              travelMode: 'walking'
-                            })}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="inline-flex items-center gap-1 text-[10px] font-extrabold bg-white/15 hover:bg-white/25 text-teal-200 px-2.5 py-1 rounded-lg"
-                          >
-                            <MapPin className="w-3 h-3" />
-                            Open Shared GPS Pin in Google Maps
-                          </a>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-              <div ref={feedEndRef} />
-            </div>
+                      <div className="text-[11px] text-amber-300 mt-1 truncate">{a.message}</div>
+                      <div className="text-[10px] text-slate-400 mt-1">
+                        {new Date(a.created_at).toLocaleTimeString()}
+                      </div>
+                    </button>
+                  ))
+                )}
+              </div>
 
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                handleSendGroupMessage();
-              }}
-              className="p-3.5 bg-navy-950 border-t border-white/10 flex items-center gap-2"
-            >
-              <input
-                type="text"
-                placeholder="Write a message to Operations & Tour Group..."
-                value={groupMessageText}
-                onChange={(e) => setGroupMessageText(e.target.value)}
-                className="flex-1 rounded-xl bg-slate-900 border border-slate-700 px-4 py-3 text-xs text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-brand-500"
-              />
-              <button
-                type="submit"
-                disabled={sending}
-                className="bg-brand-500 hover:bg-brand-600 text-white font-extrabold text-xs px-5 py-3 rounded-xl flex items-center gap-1.5 shadow-lg"
-              >
-                <Send className="w-4 h-4" />
-                Send
-              </button>
-            </form>
+              {/* Right Active SOS Chat Panel */}
+              <div className="lg:col-span-8 bg-slate-900/90 rounded-2xl border border-white/10 overflow-hidden flex flex-col">
+                {!activeAlert ? (
+                  <div className="p-10 text-center text-sm text-slate-400 my-auto">
+                    Select an SOS thread or tap <strong>I NEED HELP (SOS)</strong> above to reach Tour Operations immediately.
+                  </div>
+                ) : (
+                  <>
+                    <div className="p-4 bg-gradient-to-r from-rose-950/80 to-slate-900 border-b border-white/10 flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-[10px] font-extrabold uppercase px-2 py-0.5 rounded bg-amber-400 text-slate-950">
+                            {activeAlert.priority}
+                          </span>
+                          <span className="text-[10px] font-extrabold uppercase px-2 py-0.5 rounded bg-slate-700 text-white">
+                            {activeAlert.status}
+                          </span>
+                          {isAcknowledged && (
+                            <span className="inline-flex items-center gap-1 text-[10px] font-extrabold uppercase px-2.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-400/40">
+                              <CheckCircle2 className="w-3 h-3" /> Acknowledged by Operations
+                            </span>
+                          )}
+                        </div>
+                        <h2 className="text-base font-extrabold text-white mt-1.5">
+                          {me?.display_name} ({me?.tourist_code}) — {activeAlert.category}
+                        </h2>
+                        <p className="text-xs text-slate-300 mt-0.5">{activeAlert.message}</p>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        {organizerContact && (
+                          <a
+                            href={`tel:${organizerContact}`}
+                            className="inline-flex items-center gap-1.5 rounded-xl bg-white/15 hover:bg-white/25 text-white px-3 py-2 text-xs font-bold"
+                          >
+                            <Phone className="w-3.5 h-3.5" /> Call Leader
+                          </a>
+                        )}
+                        {!isClosedOrResolved && (
+                          <button
+                            type="button"
+                            disabled={closingSos}
+                            onClick={handleCloseSos}
+                            className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-2 text-xs font-extrabold shadow"
+                          >
+                            <XCircle className="w-3.5 h-3.5" /> {closingSos ? 'Closing...' : "Close SOS (I'm Safe)"}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Quick SOS Replies */}
+                    <div className="px-4 py-2.5 bg-slate-950/50 border-b border-white/10 flex items-center gap-2 overflow-x-auto">
+                      {[
+                        'I am waiting right where I sent the pin.',
+                        'Please call my phone now.',
+                        'I am safe now, thank you!'
+                      ].map((preset) => (
+                        <button
+                          key={preset}
+                          type="button"
+                          onClick={() => sendSosReplyText(preset)}
+                          className="text-[11px] font-bold bg-slate-800 hover:bg-rose-600 text-slate-100 px-3 py-1.5 rounded-full whitespace-nowrap border border-white/10 transition"
+                        >
+                          {preset}
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* SOS Messages */}
+                    <div className="p-4 space-y-3 min-h-[280px] max-h-[50vh] overflow-y-auto bg-slate-950">
+                      {(activeAlert.messages || []).map((msg) => {
+                        const isMe = msg.sender_role === 'tourist';
+                        return (
+                          <div key={msg.id} className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
+                            <div
+                              className={`max-w-[82%] rounded-2xl px-4 py-3 text-sm shadow-md ${
+                                isMe
+                                  ? 'bg-rose-600 text-white'
+                                  : 'bg-slate-800/90 border border-white/10 text-slate-100'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between gap-4 text-[11px] font-bold mb-1">
+                                <span className={isMe ? 'text-rose-100' : 'text-amber-400'}>{msg.sender_name}</span>
+                                <span className="text-slate-400 text-[10px]">
+                                  {new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                </span>
+                              </div>
+                              <p>{msg.message}</p>
+                            </div>
+                          </div>
+                        );
+                      })}
+                      <div ref={sosBottomRef} />
+                    </div>
+
+                    {/* SOS Reply Composer */}
+                    <form
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        sendSosReplyText(sosReply);
+                      }}
+                      className="p-3 bg-slate-900 border-t border-white/10 flex items-center gap-2"
+                    >
+                      <input
+                        type="text"
+                        value={sosReply}
+                        onChange={(e) => setSosReply(e.target.value)}
+                        placeholder="Reply directly to Tour Operations..."
+                        className="flex-1 rounded-xl bg-slate-950 border border-blue-500/40 px-4 py-2.5 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-rose-500"
+                      />
+                      <button
+                        type="submit"
+                        disabled={!sosReply.trim()}
+                        className="rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white px-4 py-2.5 text-xs sm:text-sm font-extrabold inline-flex items-center gap-1.5 shadow-lg"
+                      >
+                        <Send className="w-4 h-4" /> Send SOS Reply
+                      </button>
+                    </form>
+                  </>
+                )}
+              </div>
+            </div>
           </div>
+        ) : (
+          <div className="bg-slate-900 rounded-2xl p-8 text-center text-sm text-slate-400">Loading chat...</div>
         )}
-      </div>
+      </main>
     </div>
   );
 }

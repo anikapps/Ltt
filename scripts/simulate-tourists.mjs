@@ -5,7 +5,7 @@
 import fs from 'fs';
 import path from 'path';
 
-const count = Math.min(Math.max(1, Number(process.argv[2] || 500)), 500);
+const count = Math.min(Math.max(1, Number(process.argv[2] || 500)), 200);
 const outPath = path.join(process.cwd(), 'public', 'samples', `LTTBD_${count}_Tourists_Test_Roster.csv`);
 
 const lines = ['SL,Passenger Name,Passport Number,Contact Number'];

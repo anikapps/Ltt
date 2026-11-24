@@ -23,11 +23,11 @@ CREATE TABLE IF NOT EXISTS public.trips (
   destination TEXT NOT NULL,
   start_date DATE NOT NULL,
   end_date DATE NOT NULL,
-  max_tourists INTEGER NOT NULL DEFAULT 500 CHECK (max_tourists >= 1 AND max_tourists <= 500),
+  max_tourists INTEGER NOT NULL DEFAULT 200 CHECK (max_tourists >= 1 AND max_tourists <= 200),
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('upcoming', 'active', 'completed')),
   organizer_contact TEXT DEFAULT '+8801933-128801',
-  stale_threshold_seconds INTEGER NOT NULL DEFAULT 180,
-  update_interval_seconds INTEGER NOT NULL DEFAULT 20,
+  stale_threshold_seconds INTEGER NOT NULL DEFAULT 240,
+  update_interval_seconds INTEGER NOT NULL DEFAULT 45,
   retention_days INTEGER NOT NULL DEFAULT 7,
   separation_threshold_meters INTEGER NOT NULL DEFAULT 500,
   require_passport BOOLEAN NOT NULL DEFAULT FALSE,
@@ -331,3 +331,15 @@ ALTER TABLE public.announcements ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.announcement_receipts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.notification_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.audit_logs ENABLE ROW LEVEL SECURITY;
+
+-- ============================================================================
+-- SERVER-ONLY PERSISTENT STATE STORE (RLS ENABLED, SERVICE_ROLE ONLY)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS public.lttbd_app_state (
+  id TEXT PRIMARY KEY,
+  payload JSONB NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE public.lttbd_app_state ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE public.lttbd_app_state FROM anon, authenticated;

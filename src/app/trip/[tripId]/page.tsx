@@ -86,7 +86,10 @@ export default function TouristHomeMapPage() {
   const [sendingHelp, setSendingHelp] = useState(false);
 
   const sharingRef = useRef(sharingEnabled);
-  sharingRef.current = sharingEnabled;
+
+  useEffect(() => {
+    sharingRef.current = sharingEnabled;
+  }, [sharingEnabled]);
 
   const fetchGroupState = useCallback(async () => {
     try {
@@ -318,7 +321,8 @@ export default function TouristHomeMapPage() {
                 <Flag className="w-3 h-3" /> Next Meeting Point (Tap for Google Maps Directions)
               </div>
               <div className="text-xs font-bold text-slate-900 truncate">
-                {nextMeetingPoint.title} — {nextMeetingPoint.notes}
+                {nextMeetingPoint.title}
+                {nextMeetingPoint.notes ? ` — ${nextMeetingPoint.notes}` : ''}
               </div>
             </button>
           ) : (

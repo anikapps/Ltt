@@ -1,56 +1,85 @@
-import { MAX_PASSENGERS_PER_TRIP } from '@/lib/capacity';
 import { NextRequest, NextResponse } from 'next/server';
 import { getAdminSessionFromCookies } from '@/lib/session';
 import { getAdminDashboardSummary, createNewTrip } from '@/lib/repository';
+import { isSupabaseConfigured } from '@/lib/supabase';
+import { pgGetAdminDashboardSummary, pgCreateNewTrip } from '@/lib/db-normalized';
+import { MAX_PASSENGERS_PER_TRIP } from '@/lib/capacity';
 
 export async function GET() {
-  const admin = getAdminSessionFromCookies();
-  if (!admin) {
-    return NextResponse.json({ error: 'Unauthorized administrator access.' }, { status: 401 });
+  const session = await getAdminSessionFromCookies();
+  if (!session) {
+    return NextResponse.json({ error: 'Unauthorized administrator session.' }, { status: 401 });
   }
-
-  const summary = await getAdminDashboardSummary(admin.email);
+  if (isSupabaseConfigured()) {
+    const summary = await pgGetAdminDashboardSummary(session.email, session.role);
+    return NextResponse.json(summary);
+  }
+  const summary = await getAdminDashboardSummary(session.email);
   return NextResponse.json(summary);
 }
 
 export async function POST(req: NextRequest) {
-  const admin = getAdminSessionFromCookies();
-  if (!admin) {
-    return NextResponse.json({ error: 'Unauthorized administrator access.' }, { status: 401 });
+  const session = await getAdminSessionFromCookies();
+  if (!session) {
+    return NextResponse.json({ error: 'Unauthorized administrator session.' }, { status: 401 });
+  }
+  if (session.role === 'responder') {
+    return NextResponse.json({ error: 'Responders cannot create new trips.' }, { status: 403 });
   }
 
   try {
     const body = await req.json();
-    const { name, destination, start_date, end_date, max_tourists } = body;
+    const name = String(body.name || '').trim();
+    const destination = String(body.destination || '').trim();
+    const start_date = String(body.start_date || '').trim();
+    const end_date = String(body.end_date || '').trim();
+    const parsedMax = Number(body.max_tourists || MAX_PASSENGERS_PER_TRIP);
+    if (!Number.isFinite(parsedMax) || parsedMax < 1 || parsedMax > MAX_PASSENGERS_PER_TRIP) {
+      return NextResponse.json(
+        { error: `Maximum tourists per trip must be between 1 and ${MAX_PASSENGERS_PER_TRIP}.` },
+        { status: 400 }
+      );
+    }
 
     if (!name || !destination || !start_date || !end_date) {
       return NextResponse.json(
-        { error: 'Trip Name, Destination, Start Date, and End Date are required.' },
+        { error: 'Please provide trip name, destination, start date, and end date.' },
         { status: 400 }
       );
     }
 
-    const parsedMax = Number(max_tourists ?? MAX_PASSENGERS_PER_TRIP);
-    if (!Number.isInteger(parsedMax) || parsedMax < 1 || parsedMax > MAX_PASSENGERS_PER_TRIP) {
-      return NextResponse.json(
-        { error: `Passenger capacity must be between 1 and ${MAX_PASSENGERS_PER_TRIP} passengers.` },
-        { status: 400 }
-      );
+    if (isSupabaseConfigured()) {
+      const result = await pgCreateNewTrip({
+        name,
+        destination,
+        start_date,
+        end_date,
+        max_tourists: parsedMax,
+        organizer_contact: String(body.organizer_contact || ''),
+        require_passport: Boolean(body.require_passport),
+        adminEmail: session.email,
+        adminName: session.name
+      });
+      return NextResponse.json(result, { status: 201 });
     }
 
-    const created = await createNewTrip({
-      name: String(name),
-      destination: String(destination),
-      start_date: String(start_date),
-      end_date: String(end_date),
+    const result = await createNewTrip({
+      name,
+      destination,
+      start_date,
+      end_date,
       max_tourists: parsedMax,
-      adminEmail: admin.email,
-      adminName: admin.name
+      organizer_contact: String(body.organizer_contact || ''),
+      require_passport: Boolean(body.require_passport),
+      adminEmail: session.email,
+      adminName: session.name
     });
 
-    return NextResponse.json(created, { status: 201 });
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : 'Failed to create trip.';
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json(result, { status: 201 });
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : 'Failed to create trip.' },
+      { status: 500 }
+    );
   }
 }

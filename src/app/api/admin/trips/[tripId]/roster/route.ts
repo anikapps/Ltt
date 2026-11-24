@@ -1,77 +1,67 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAdminSessionFromCookies } from '@/lib/session';
-import { parseAndValidateRosterBuffer } from '@/lib/roster-parser';
-import { getAdminTripDetail, saveImportedRoster } from '@/lib/repository';
+import { parseRosterBuffer } from '@/lib/roster-parser';
+import { saveImportedRoster } from '@/lib/repository';
+import { isSupabaseConfigured } from '@/lib/supabase';
+import { pgSaveImportedRoster } from '@/lib/db-normalized';
 
 export async function POST(
   req: NextRequest,
-  { params }: { params: { tripId: string } }
+  context: { params: Promise<{ tripId: string }> }
 ) {
-  const admin = getAdminSessionFromCookies();
-  if (!admin) {
-    return NextResponse.json({ error: 'Unauthorized administrator access.' }, { status: 401 });
+  const session = await getAdminSessionFromCookies();
+  if (!session) {
+    return NextResponse.json({ error: 'Unauthorized administrator session.' }, { status: 401 });
+  }
+  if (session.role === 'responder') {
+    return NextResponse.json({ error: 'Responders cannot modify passenger rosters.' }, { status: 403 });
   }
 
   try {
-    const tripDetail = await getAdminTripDetail(params.tripId, admin.email);
-    if (!tripDetail) {
-      return NextResponse.json({ error: 'Trip not found.' }, { status: 404 });
-    }
-
-    if (tripDetail.trip.status === 'completed') {
-      return NextResponse.json(
-        { error: 'Cannot upload a passenger roster to a completed trip.' },
-        { status: 400 }
-      );
-    }
-
+    const { tripId } = await context.params;
     const formData = await req.formData();
-    const file = formData.get('file') as File | null;
-
-    if (!file) {
-      return NextResponse.json(
-        { error: 'Please select a valid .xlsx or .csv roster file.' },
-        { status: 400 }
-      );
+    const file = formData.get('file');
+    if (!(file instanceof File)) {
+      return NextResponse.json({ error: 'Please upload a valid .xlsx or .csv roster file.' }, { status: 400 });
     }
 
-    const fileName = file.name.toLowerCase();
-    if (!fileName.endsWith('.xlsx') && !fileName.endsWith('.csv') && !fileName.endsWith('.xls')) {
-      return NextResponse.json(
-        { error: 'Unsupported file format. Please upload an Excel (.xlsx) or CSV (.csv) file.' },
-        { status: 400 }
-      );
+    if (file.size > 5 * 1024 * 1024) {
+      return NextResponse.json({ error: 'Roster file must be smaller than 5 MB.' }, { status: 400 });
     }
 
     const arrayBuffer = await file.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
+    const parsedResult = await parseRosterBuffer(buffer, file.name);
+    const parsedEntries = parsedResult.entries;
 
-    const parseResult = parseAndValidateRosterBuffer(
-      buffer,
-      params.tripId,
-      tripDetail.trip.max_tourists
-    );
-
-    if (!parseResult.valid) {
+    if (parsedEntries.length === 0) {
       return NextResponse.json(
         {
-          valid: false,
-          errors: parseResult.errors,
-          totalRowsRead: parseResult.totalRowsRead
+          error: parsedResult.errors[0] || 'No valid passenger rows found in uploaded file.',
+          validationErrors: parsedResult.errors
         },
-        { status: 422 }
+        { status: 400 }
       );
     }
 
-    const saved = await saveImportedRoster(params.tripId, parseResult.entries, admin.email);
+    const parsed = isSupabaseConfigured()
+      ? await pgSaveImportedRoster({ tripId, entries: parsedEntries, actorEmail: session.email })
+      : await saveImportedRoster(tripId, parsedEntries, session.email);
+
+    const importedCount =
+      parsed && typeof parsed === 'object' && 'importedCount' in parsed
+        ? parsed.importedCount
+        : parsedEntries.length;
 
     return NextResponse.json({
-      valid: true,
-      importedCount: saved.importedCount,
-      errors: []
+      importedCount,
+      totalRows: parsedResult.totalRows,
+      validationErrors: parsedResult.errors
     });
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : 'Failed to import passenger roster.';
-    return NextResponse.json({ error: message }, { status: 500 });
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : 'Failed to parse uploaded roster.' },
+      { status: 500 }
+    );
   }
 }

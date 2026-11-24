@@ -1,13 +1,10 @@
-/**
- * One authoritative per-trip passenger ceiling.
- * Keep database enforcement in sync with this application constant.
- */
-export const MAX_PASSENGERS_PER_TRIP = 500;
+export const MIN_PASSENGERS_PER_TRIP = 1;
+export const MAX_PASSENGERS_PER_TRIP = 200;
 
 export function clampPassengerCapacity(value: unknown, fallback = MAX_PASSENGERS_PER_TRIP): number {
-  const parsed = Number(value ?? fallback);
-  if (!Number.isInteger(parsed) || parsed < 1) {
-    throw new Error(`Passenger capacity must be a whole number between 1 and ${MAX_PASSENGERS_PER_TRIP}.`);
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
   }
-  return Math.min(parsed, MAX_PASSENGERS_PER_TRIP);
+  return Math.max(MIN_PASSENGERS_PER_TRIP, Math.min(MAX_PASSENGERS_PER_TRIP, Math.trunc(parsed)));
 }

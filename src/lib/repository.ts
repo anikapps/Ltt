@@ -1,4 +1,5 @@
 import { MAX_PASSENGERS_PER_TRIP, clampPassengerCapacity } from './capacity';
+import { getSupabaseAdminClient, isSupabaseConfigured } from './supabase';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
@@ -130,6 +131,7 @@ function createInitialSeedStore(): LocalDatabaseSchema {
         longitude: pax.lng,
         accuracy: 12,
         sharing_status: pax.sharing ? (pax.minAgo > 3 ? 'offline' : 'sharing') : 'disabled',
+        captured_at: updatedTime,
         updated_at: updatedTime
       });
     }
@@ -204,8 +206,7 @@ function createInitialSeedStore(): LocalDatabaseSchema {
           airport_terminal: 'International Departures — Level 5, Row G',
           airport_lat: 2.7456,
           airport_lng: 101.7072,
-          organizer_name: 'LTT BD Tour Leader & Operations Desk',
-          organizer_phone: '',
+          organizer_hotline: '',
           local_emergency_police: '999',
           local_emergency_medical: '999 / +603-2615-5555 (KL Hospital)',
           embassy_name: 'Bangladesh High Commission, Kuala Lumpur',
@@ -278,8 +279,12 @@ function createInitialSeedStore(): LocalDatabaseSchema {
         responses: [
           {
             member_id: members[0]?.id || 'm1',
+            tourist_code: 'LTT-001',
             display_name: 'MD RAHIM UDDIN',
+            subgroup_name: 'Bus A',
             status: 'present',
+            latitude: 3.1579,
+            longitude: 101.7116,
             responded_at: now
           }
         ]
@@ -305,7 +310,7 @@ function createInitialSeedStore(): LocalDatabaseSchema {
         sender_id: 'admin-1',
         sender_name: 'Tour Leader — Kuala Lumpur',
         sender_code: 'ORGANIZER',
-        sender_role: 'organizer',
+        sender_role: 'admin',
         message: 'Welcome everyone to Kuala Lumpur! Our hotel (Traders Hotel KLCC) and KLIA Airport pins are saved on your map and in the Essentials section below.',
         created_at: new Date(Date.now() - 25 * 60 * 1000).toISOString()
       },
@@ -336,7 +341,48 @@ function createInitialSeedStore(): LocalDatabaseSchema {
   };
 }
 
-function readLocalStore(): LocalDatabaseSchema {
+const SUPABASE_STATE_ROW_ID = 'primary';
+
+function hydrateStoreDefaults(parsed: LocalDatabaseSchema): LocalDatabaseSchema {
+  if (!parsed.meeting_points) parsed.meeting_points = createInitialSeedStore().meeting_points;
+  if (!parsed.headcount_sessions) parsed.headcount_sessions = createInitialSeedStore().headcount_sessions;
+  if (!parsed.announcements) parsed.announcements = createInitialSeedStore().announcements;
+  if (!parsed.group_messages) parsed.group_messages = createInitialSeedStore().group_messages;
+  if (parsed.trips[0] && !parsed.trips[0].essentials) parsed.trips[0].essentials = createInitialSeedStore().trips[0].essentials;
+  // Backfill captured_at for locations written by older versions of the local store.
+  for (const loc of parsed.locations || []) {
+    if (!loc.captured_at) loc.captured_at = loc.updated_at;
+  }
+  return parsed;
+}
+
+async function readStore(): Promise<LocalDatabaseSchema> {
+  const sb = getSupabaseAdminClient();
+  if (sb) {
+    try {
+      const { data, error } = await sb
+        .from('lttbd_app_state')
+        .select('payload')
+        .eq('id', SUPABASE_STATE_ROW_ID)
+        .maybeSingle();
+
+      if (!error && data?.payload) {
+        return hydrateStoreDefaults(data.payload as LocalDatabaseSchema);
+      }
+
+      const seed = createInitialSeedStore();
+      await sb.from('lttbd_app_state').upsert({
+        id: SUPABASE_STATE_ROW_ID,
+        payload: seed,
+        updated_at: new Date().toISOString()
+      });
+      return seed;
+    } catch (err) {
+      console.error('Supabase readStore error, falling back to seed:', err);
+      return createInitialSeedStore();
+    }
+  }
+
   try {
     if (!fs.existsSync(DATA_DIR)) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -347,19 +393,27 @@ function readLocalStore(): LocalDatabaseSchema {
       return seed;
     }
     const raw = fs.readFileSync(STORE_PATH, 'utf8');
-    const parsed = JSON.parse(raw) as LocalDatabaseSchema;
-    if (!parsed.meeting_points) parsed.meeting_points = createInitialSeedStore().meeting_points;
-    if (!parsed.headcount_sessions) parsed.headcount_sessions = createInitialSeedStore().headcount_sessions;
-    if (!parsed.announcements) parsed.announcements = createInitialSeedStore().announcements;
-    if (!parsed.group_messages) parsed.group_messages = createInitialSeedStore().group_messages;
-    if (parsed.trips[0] && !parsed.trips[0].essentials) parsed.trips[0].essentials = createInitialSeedStore().trips[0].essentials;
-    return parsed;
+    return hydrateStoreDefaults(JSON.parse(raw) as LocalDatabaseSchema);
   } catch {
     return createInitialSeedStore();
   }
 }
 
-function writeLocalStore(store: LocalDatabaseSchema): void {
+async function writeStore(store: LocalDatabaseSchema): Promise<void> {
+  const sb = getSupabaseAdminClient();
+  if (sb) {
+    const { error } = await sb.from('lttbd_app_state').upsert({
+      id: SUPABASE_STATE_ROW_ID,
+      payload: store,
+      updated_at: new Date().toISOString()
+    });
+    if (error) {
+      console.error('Failed to write Supabase state:', error.message);
+      throw new Error('Failed to save changes to Supabase database.');
+    }
+    return;
+  }
+
   try {
     if (!fs.existsSync(DATA_DIR)) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -375,7 +429,7 @@ function isResolvedStatus(st: AlertStatus): boolean {
 }
 
 export async function getAdminDashboardSummary(adminEmail: string) {
-  const store = readLocalStore();
+  const store = await readStore();
   const locMap = new Map(store.locations.map((l) => [l.member_id, l]));
   let currentlySharing = 0;
   let stoppedSharing = 0;
@@ -391,7 +445,7 @@ export async function getAdminDashboardSummary(adminEmail: string) {
   const activeAlerts = store.emergency_alerts.filter((a) => !isResolvedStatus(a.status));
 
   return {
-    mode: 'local' as const,
+    mode: (isSupabaseConfigured() ? 'supabase' : 'local') as 'supabase' | 'local',
     metrics: {
       totalActiveTrips: store.trips.filter((t) => t.status === 'active').length,
       upcomingTrips: store.trips.filter((t) => t.status === 'upcoming').length,
@@ -413,6 +467,8 @@ export async function createNewTrip(params: {
   start_date: string;
   end_date: string;
   max_tourists: number;
+  organizer_contact?: string;
+  require_passport?: boolean;
   adminEmail: string;
   adminName: string;
 }): Promise<{ trip: Trip; invite: TripInvite }> {
@@ -422,7 +478,7 @@ export async function createNewTrip(params: {
   const invitationCode = crypto.randomBytes(3).toString('hex').toUpperCase();
   const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
 
-  const store = readLocalStore();
+  const store = await readStore();
   const newTrip: Trip = {
     id: crypto.randomUUID(),
     name: params.name.trim(),
@@ -431,12 +487,12 @@ export async function createNewTrip(params: {
     end_date: params.end_date,
     max_tourists: cappedMax,
     status: 'active',
-    organizer_contact: '',
+    organizer_contact: (params.organizer_contact || '').trim(),
     stale_threshold_seconds: 180,
     update_interval_seconds: 20,
     retention_days: 7,
     separation_threshold_meters: 500,
-    verification_mode: 'strict_roster',
+    require_passport: Boolean(params.require_passport),
     itinerary: [],
     created_at: now,
     ended_at: null
@@ -473,12 +529,12 @@ export async function createNewTrip(params: {
     created_at: now
   });
 
-  writeLocalStore(store);
+  await writeStore(store);
   return { trip: newTrip, invite: newInvite };
 }
 
 export async function getAdminTripDetail(tripId: string, _adminEmail: string) {
-  const store = readLocalStore();
+  const store = await readStore();
   const trip = store.trips.find((t) => t.id === tripId);
   if (!trip) return null;
 
@@ -506,6 +562,12 @@ export async function getAdminTripDetail(tripId: string, _adminEmail: string) {
   const primaryMp = meetingPoints.find((mp) => mp.is_active);
   const sepThreshold = trip.separation_threshold_meters || 500;
 
+  const openAlertByMemberId = new Map(
+    alerts
+      .filter((a) => !isResolvedStatus(a.status))
+      .map((a) => [a.member_id, a])
+  );
+
   const passengers: AdminPassengerView[] = roster.map((r) => {
     const member = memberByRosterId.get(r.id);
     const loc = member ? locationByMemberId.get(member.id) : undefined;
@@ -518,21 +580,27 @@ export async function getAdminTripDetail(tripId: string, _adminEmail: string) {
         ? getDistanceMeters(primaryMp.latitude, primaryMp.longitude, loc.latitude, loc.longitude)
         : 0;
 
+    const openAlert = member ? openAlertByMemberId.get(member.id) : undefined;
+
     return {
       roster_id: r.id,
       serial_no: r.serial_no,
       is_claimed: r.is_claimed || Boolean(member),
       member_id: member ? member.id : '',
       tourist_code: member?.tourist_code || `LTT-${String(r.serial_no).padStart(3, '0')}`,
-      display_name: r.full_name_display,
+      full_name_display: r.full_name_display,
+      display_name: member?.display_name || r.full_name_display,
       subgroup_name: member?.subgroup_name || r.subgroup_name || 'Main Group',
       sharing_enabled: member ? member.sharing_enabled : false,
       effective_status: effectiveStatus,
       last_seen_at: member ? member.last_seen_at : null,
+      location_updated_at: loc ? loc.updated_at : null,
       latitude: loc ? loc.latitude : null,
       longitude: loc ? loc.longitude : null,
       accuracy: loc ? loc.accuracy : null,
-      location_updated_at: loc ? loc.updated_at : null,
+      joined_at: member?.joined_at || null,
+      has_active_alert: Boolean(openAlert),
+      active_alert_id: openAlert?.id || null,
       possible_separation: distToMp > sepThreshold,
       passport_masked: r.passport_masked,
       contact_number_admin: r.contact_number_admin,
@@ -561,15 +629,19 @@ export async function getAdminTripDetail(tripId: string, _adminEmail: string) {
         is_claimed: true,
         member_id: m.id,
         tourist_code: m.tourist_code || `LTT-${extraSerial}`,
+        full_name_display: m.display_name,
         display_name: m.display_name,
         subgroup_name: m.subgroup_name || 'Main Group',
         sharing_enabled: m.sharing_enabled,
         effective_status: effectiveStatus,
         last_seen_at: m.last_seen_at,
+        location_updated_at: loc ? loc.updated_at : null,
         latitude: loc ? loc.latitude : null,
         longitude: loc ? loc.longitude : null,
         accuracy: loc ? loc.accuracy : null,
-        location_updated_at: loc ? loc.updated_at : null,
+        joined_at: m.joined_at || null,
+        has_active_alert: openAlertByMemberId.has(m.id),
+        active_alert_id: openAlertByMemberId.get(m.id)?.id || null,
         possible_separation: distToMp > sepThreshold,
         passport_masked: m.passport_masked || '—',
         contact_number_admin: m.contact_info || 'Self-registered',
@@ -614,7 +686,7 @@ export async function createMeetingPoint(params: {
   actorEmail: string;
 }): Promise<MeetingPoint> {
   const now = new Date().toISOString();
-  const store = readLocalStore();
+  const store = await readStore();
   const mp: MeetingPoint = {
     id: crypto.randomUUID(),
     trip_id: params.tripId,
@@ -622,7 +694,9 @@ export async function createMeetingPoint(params: {
     latitude: Number(params.latitude),
     longitude: Number(params.longitude),
     notes: params.notes.trim(),
+    description: params.notes.trim(),
     scheduled_at: params.scheduledAt || now,
+    scheduled_time: params.scheduledAt || now,
     radius_meters: Number(params.radiusMeters) || 250,
     is_active: true,
     created_at: now
@@ -636,7 +710,7 @@ export async function createMeetingPoint(params: {
     details: { title: mp.title, radius_meters: mp.radius_meters },
     created_at: now
   });
-  writeLocalStore(store);
+  await writeStore(store);
   return mp;
 }
 
@@ -646,14 +720,14 @@ export async function toggleOrDeleteMeetingPoint(params: {
   subAction: 'toggle' | 'delete';
   actorEmail: string;
 }) {
-  const store = readLocalStore();
+  const store = await readStore();
   if (params.subAction === 'delete') {
     store.meeting_points = store.meeting_points.filter((m) => m.id !== params.meetingPointId);
   } else {
     const target = store.meeting_points.find((m) => m.id === params.meetingPointId);
     if (target) target.is_active = !target.is_active;
   }
-  writeLocalStore(store);
+  await writeStore(store);
 }
 
 export async function startHeadcountSession(params: {
@@ -663,7 +737,7 @@ export async function startHeadcountSession(params: {
   actorEmail: string;
 }): Promise<HeadcountSession> {
   const now = new Date().toISOString();
-  const store = readLocalStore();
+  const store = await readStore();
   const hc: HeadcountSession = {
     id: crypto.randomUUID(),
     trip_id: params.tripId,
@@ -684,13 +758,13 @@ export async function startHeadcountSession(params: {
     details: { title: hc.title, subgroup: hc.subgroup_name },
     created_at: now
   });
-  writeLocalStore(store);
+  await writeStore(store);
   return hc;
 }
 
 export async function closeHeadcountSession(tripId: string, sessionId: string, actorEmail: string) {
   const now = new Date().toISOString();
-  const store = readLocalStore();
+  const store = await readStore();
   const hc = store.headcount_sessions.find((s) => s.id === sessionId && s.trip_id === tripId);
   if (hc) {
     hc.status = 'closed';
@@ -704,28 +778,49 @@ export async function closeHeadcountSession(tripId: string, sessionId: string, a
     details: { sessionId },
     created_at: now
   });
-  writeLocalStore(store);
+  await writeStore(store);
 }
 
 export async function recordHeadcountResponse(params: {
   tripId: string;
   sessionId: string;
   memberId: string;
-  displayName: string;
+  displayName?: string;
   status: 'present' | 'needs_help';
+  latitude?: number | null;
+  longitude?: number | null;
 }) {
   const now = new Date().toISOString();
-  const store = readLocalStore();
+  const store = await readStore();
   const hc = store.headcount_sessions.find(
     (s) => s.id === params.sessionId && s.trip_id === params.tripId
   );
   if (!hc || hc.status !== 'open') return null;
 
+  const member = store.trip_members.find(
+    (m) => m.id === params.memberId && m.trip_id === params.tripId
+  );
+  const loc = store.locations.find((l) => l.member_id === params.memberId);
+
   const existingIdx = hc.responses.findIndex((r) => r.member_id === params.memberId);
   const entry = {
     member_id: params.memberId,
-    display_name: params.displayName,
+    tourist_code: member?.tourist_code || 'LTT-000',
+    display_name: params.displayName || member?.display_name || 'Passenger',
+    subgroup_name: member?.subgroup_name || 'Main Group',
     status: params.status,
+    latitude:
+      typeof params.latitude === 'number'
+        ? params.latitude
+        : loc
+        ? loc.latitude
+        : null,
+    longitude:
+      typeof params.longitude === 'number'
+        ? params.longitude
+        : loc
+        ? loc.longitude
+        : null,
     responded_at: now
   };
   if (existingIdx >= 0) {
@@ -733,7 +828,7 @@ export async function recordHeadcountResponse(params: {
   } else {
     hc.responses.push(entry);
   }
-  writeLocalStore(store);
+  await writeStore(store);
   return hc;
 }
 
@@ -746,7 +841,7 @@ export async function createAnnouncement(params: {
   actorEmail: string;
 }): Promise<AnnouncementItem> {
   const now = new Date().toISOString();
-  const store = readLocalStore();
+  const store = await readStore();
   const ann: AnnouncementItem = {
     id: crypto.randomUUID(),
     trip_id: params.tripId,
@@ -767,16 +862,16 @@ export async function createAnnouncement(params: {
     details: { title: ann.title, priority: ann.priority },
     created_at: now
   });
-  writeLocalStore(store);
+  await writeStore(store);
   return ann;
 }
 
 export async function markAnnouncementRead(tripId: string, announcementId: string, memberId: string) {
-  const store = readLocalStore();
+  const store = await readStore();
   const ann = store.announcements.find((a) => a.id === announcementId && a.trip_id === tripId);
   if (ann && !ann.read_by_member_ids.includes(memberId)) {
     ann.read_by_member_ids.push(memberId);
-    writeLocalStore(store);
+    await writeStore(store);
   }
 }
 
@@ -789,7 +884,7 @@ export async function updateTripSettings(params: {
   organizerContact?: string;
   actorEmail: string;
 }) {
-  const store = readLocalStore();
+  const store = await readStore();
   const trip = store.trips.find((t) => t.id === params.tripId);
   if (!trip) throw new Error('Trip not found');
 
@@ -814,7 +909,7 @@ export async function updateTripSettings(params: {
     created_at: new Date().toISOString()
   });
 
-  writeLocalStore(store);
+  await writeStore(store);
   return trip;
 }
 
@@ -824,7 +919,7 @@ export async function saveImportedRoster(
   actorEmail: string
 ): Promise<{ importedCount: number }> {
   const now = new Date().toISOString();
-  const store = readLocalStore();
+  const store = await readStore();
   const trip = store.trips.find((t) => t.id === tripId);
   if (!trip) throw new Error('Trip not found');
 
@@ -833,27 +928,57 @@ export async function saveImportedRoster(
     throw new Error(`Roster size (${entries.length}) exceeds maximum capacity of ${maxCap} tourists.`);
   }
 
+  const previousRoster = store.passenger_roster.filter((r) => r.trip_id === tripId);
   store.passenger_roster = store.passenger_roster.filter((r) => r.trip_id !== tripId);
-  store.trip_members = store.trip_members.filter((m) => m.trip_id !== tripId);
-  store.locations = store.locations.filter((l) => l.trip_id !== tripId);
 
+  const newRosterIds: string[] = [];
   for (const e of entries) {
+    const normName = normalizePassengerName(e.fullName);
+    const normPassport = normalizePassportNumber(e.passportNumber);
+    const normPhone = normalizePhoneNumber(e.contactNumber);
+    const rosterId = crypto.randomUUID();
+    newRosterIds.push(rosterId);
     store.passenger_roster.push({
-      id: crypto.randomUUID(),
+      id: rosterId,
       trip_id: tripId,
-      serial_no: e.serial_no,
-      full_name_display: e.full_name_display,
-      normalized_name: e.normalized_name,
-      passport_hash: e.passport_hash,
-      passport_masked: e.passport_masked,
-      contact_hash: e.contact_hash,
-      contact_number_admin: e.contact_number_admin,
-      subgroup_name: 'Main Group',
+      serial_no: e.serialNo,
+      full_name_display: e.fullName,
+      normalized_name: normName,
+      passport_hash: normPassport ? hashSensitiveIdentifier(tripId, normPassport) : '',
+      passport_masked: maskPassportNumber(normPassport),
+      contact_hash: normPhone ? hashSensitiveIdentifier(tripId, normPhone) : '',
+      contact_number_admin: normPhone || e.contactNumber,
+      subgroup_name: e.subgroupName || 'Main Group',
       is_claimed: false,
       claimed_member_id: null,
       claimed_at: null,
       created_at: now
     });
+  }
+
+  // Re-importing a roster must never kick joined tourists out of their live
+  // sessions (Supabase mode keeps trip_members too). Re-link existing members
+  // to the fresh roster rows by their passport/contact HMAC; members that no
+  // longer match stay joined as unlinked extras instead of being deleted.
+  const oldByMember = new Map(previousRoster.filter((r) => r.claimed_member_id).map((r) => [r.claimed_member_id!, r]));
+  for (const member of store.trip_members) {
+    if (member.trip_id !== tripId) continue;
+    const oldRow = oldByMember.get(member.id);
+    if (!oldRow) continue;
+    const relinked = store.passenger_roster.find(
+      (r) =>
+        r.trip_id === tripId &&
+        ((oldRow.passport_hash && r.passport_hash && r.passport_hash === oldRow.passport_hash) ||
+          (oldRow.contact_hash && r.contact_hash && r.contact_hash === oldRow.contact_hash))
+    );
+    if (relinked) {
+      member.roster_id = relinked.id;
+      relinked.is_claimed = true;
+      relinked.claimed_member_id = member.id;
+      relinked.claimed_at = now;
+    } else {
+      member.roster_id = null;
+    }
   }
 
   store.audit_logs.unshift({
@@ -865,7 +990,7 @@ export async function saveImportedRoster(
     created_at: now
   });
 
-  writeLocalStore(store);
+  await writeStore(store);
   return { importedCount: entries.length };
 }
 
@@ -879,7 +1004,7 @@ export async function generateOrRotateInviteLink(
   const invitationCode = crypto.randomBytes(3).toString('hex').toUpperCase();
   const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
 
-  const store = readLocalStore();
+  const store = await readStore();
   if (revokeExisting) {
     store.trip_invites.forEach((inv) => {
       if (inv.trip_id === tripId) inv.is_revoked = true;
@@ -903,7 +1028,7 @@ export async function generateOrRotateInviteLink(
     details: { token, invitationCode },
     created_at: now
   });
-  writeLocalStore(store);
+  await writeStore(store);
   return newInv;
 }
 
@@ -917,7 +1042,7 @@ export async function manageTripAdministrators(params: {
 }): Promise<TripAdmin[]> {
   const now = new Date().toISOString();
   const cleanTargetEmail = params.targetEmail.trim().toLowerCase();
-  const store = readLocalStore();
+  const store = await readStore();
 
   if (params.action === 'add') {
     const existing = store.trip_admins.find(
@@ -956,7 +1081,7 @@ export async function manageTripAdministrators(params: {
     created_at: now
   });
 
-  writeLocalStore(store);
+  await writeStore(store);
   return store.trip_admins.filter((a) => a.trip_id === params.tripId);
 }
 
@@ -966,7 +1091,7 @@ export async function removePassengerFromTrip(
   actorEmail: string
 ): Promise<void> {
   const now = new Date().toISOString();
-  const store = readLocalStore();
+  const store = await readStore();
   const member = store.trip_members.find(
     (m) => m.trip_id === tripId && (m.roster_id === rosterOrMemberId || m.id === rosterOrMemberId)
   );
@@ -991,12 +1116,12 @@ export async function removePassengerFromTrip(
     details: { rosterOrMemberId },
     created_at: now
   });
-  writeLocalStore(store);
+  await writeStore(store);
 }
 
 export async function endTripAndPurgePersonalData(tripId: string, actorEmail: string) {
   const now = new Date().toISOString();
-  const store = readLocalStore();
+  const store = await readStore();
   const trip = store.trips.find((t) => t.id === tripId);
   if (!trip) throw new Error('Trip not found');
 
@@ -1034,12 +1159,84 @@ export async function endTripAndPurgePersonalData(tripId: string, actorEmail: st
     created_at: now
   });
 
-  writeLocalStore(store);
+  await writeStore(store);
   return summary;
 }
 
+export async function archiveTrip(tripId: string, actorEmail: string) {
+  const now = new Date().toISOString();
+  const store = await readStore();
+  const trip = store.trips.find((t) => t.id === tripId);
+  if (!trip) throw new Error('Trip not found');
+
+  trip.status = 'archived';
+  trip.archived_at = now;
+
+  store.audit_logs.unshift({
+    id: crypto.randomUUID(),
+    trip_id: tripId,
+    actor_label: actorEmail,
+    action: 'TRIP_ARCHIVED',
+    details: { trip_name: trip.name },
+    created_at: now
+  });
+
+  await writeStore(store);
+  return { archived: true };
+}
+
+export async function reviveArchivedTrip(tripId: string, actorEmail: string) {
+  const now = new Date().toISOString();
+  const store = await readStore();
+  const trip = store.trips.find((t) => t.id === tripId);
+  if (!trip) throw new Error('Trip not found');
+
+  // Security rule: reviving an old tour must not reactivate old sessions,
+  // sharing consents, or old invitation links.
+  for (const member of store.trip_members) {
+    if (member.trip_id === tripId) {
+      member.sharing_enabled = false;
+      member.session_revoked = true;
+    }
+  }
+  for (const inv of store.trip_invites) {
+    if (inv.trip_id === tripId) inv.is_revoked = true;
+  }
+  for (const loc of store.locations) {
+    if (loc.trip_id === tripId) loc.sharing_status = 'disabled';
+  }
+
+  trip.status = 'active';
+  trip.ended_at = null;
+  trip.archived_at = null;
+
+  const token = `ltt-${crypto.randomBytes(8).toString('hex')}`;
+  const newInvite: TripInvite = {
+    id: crypto.randomUUID(),
+    trip_id: tripId,
+    token,
+    invitation_code: crypto.randomBytes(3).toString('hex').toUpperCase(),
+    is_revoked: false,
+    expires_at: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(),
+    created_at: now
+  };
+  store.trip_invites.unshift(newInvite);
+
+  store.audit_logs.unshift({
+    id: crypto.randomUUID(),
+    trip_id: tripId,
+    actor_label: actorEmail,
+    action: 'TRIP_REVIVED',
+    details: { fresh_invite_token: token, old_sessions_revoked: true },
+    created_at: now
+  });
+
+  await writeStore(store);
+  return { tripId, newInvite };
+}
+
 export async function getInvitePublicInfo(tokenOrCode: string) {
-  const store = readLocalStore();
+  const store = await readStore();
   const clean = tokenOrCode.trim();
   const invite = store.trip_invites.find(
     (i) => i.token === clean || (i.invitation_code && i.invitation_code.toLowerCase() === clean.toLowerCase())
@@ -1116,7 +1313,7 @@ export async function verifyAndRegisterTourist(params: {
     };
   }
 
-  const store = readLocalStore();
+  const store = await readStore();
   const tripObj = store.trips.find((t) => t.id === tripId);
   const maxTourists = Math.min(tripObj?.max_tourists || MAX_PASSENGERS_PER_TRIP, MAX_PASSENGERS_PER_TRIP);
   const currentMembers = store.trip_members.filter((m) => m.trip_id === tripId);
@@ -1167,7 +1364,7 @@ export async function verifyAndRegisterTourist(params: {
     existingMember.last_seen_at = now;
     existingMember.sharing_enabled = sharingEnabled;
     existingMember.consent_granted = sharingEnabled;
-    writeLocalStore(store);
+    await writeStore(store);
     return {
       ok: true,
       status: 200,
@@ -1228,6 +1425,7 @@ export async function verifyAndRegisterTourist(params: {
       longitude: params.initialLng,
       accuracy: params.initialAcc ?? 15,
       sharing_status: 'sharing',
+      captured_at: now,
       updated_at: now
     });
   }
@@ -1241,7 +1439,7 @@ export async function verifyAndRegisterTourist(params: {
     created_at: now
   });
 
-  writeLocalStore(store);
+  await writeStore(store);
 
   return {
     ok: true,
@@ -1262,14 +1460,14 @@ export async function validateActiveTouristMember(
   rawSessionToken: string
 ): Promise<TripMember | null> {
   const expectedHash = hashSessionToken(rawSessionToken);
-  const store = readLocalStore();
+  const store = await readStore();
   const member = store.trip_members.find((m) => m.id === memberId && m.trip_id === tripId);
   if (!member || member.session_token_hash !== expectedHash) return null;
   return member;
 }
 
 export async function getTouristGroupMapState(tripId: string, requestingMemberId: string) {
-  const store = readLocalStore();
+  const store = await readStore();
   const trip = store.trips.find((t) => t.id === tripId);
   if (!trip || trip.status === 'completed') {
     return null;
@@ -1313,9 +1511,12 @@ export async function getTouristGroupMapState(tripId: string, requestingMemberId
       longitude: loc ? loc.longitude : null,
       accuracy: loc ? loc.accuracy : null,
       location_updated_at: loc ? loc.updated_at : null,
-      possible_separation: distToMp > sepThreshold
+      possible_separation: distToMp > sepThreshold,
+      is_me: m.id === requestingMemberId
     };
   });
+
+  const mePeer = peers.find((p) => p.member_id === requestingMemberId) || null;
 
   return {
     trip: {
@@ -1328,11 +1529,12 @@ export async function getTouristGroupMapState(tripId: string, requestingMemberId
       stale_threshold_seconds: trip.stale_threshold_seconds || 180,
       update_interval_seconds: trip.update_interval_seconds || 20,
       retention_days: trip.retention_days || 7,
-      itinerary: trip.itinerary || [],
+      itinerary: trip.itinerary || trip.essentials?.itinerary || [],
       essentials: trip.essentials,
       status: trip.status
     },
-    me: peers.find((p) => p.member_id === requestingMemberId) || null,
+    // `id` and `member_id` are the same value; different pages read either name.
+    me: mePeer ? { ...mePeer, id: mePeer.member_id } : null,
     peers,
     meetingPoints,
     headcounts,
@@ -1345,38 +1547,41 @@ export async function getTouristGroupMapState(tripId: string, requestingMemberId
 export async function updateTouristLocationOrSharing(params: {
   memberId: string;
   tripId: string;
-  sharingEnabled: boolean;
+  sharingEnabled?: boolean;
   latitude?: number | null;
   longitude?: number | null;
   accuracy?: number | null;
   statusOverride?: SharingStatus;
-}): Promise<void> {
+}): Promise<{ sharingEnabled: boolean }> {
   const now = new Date().toISOString();
-  const store = readLocalStore();
+  const store = await readStore();
   const member = store.trip_members.find(
     (m) => m.id === params.memberId && m.trip_id === params.tripId
   );
-  if (!member) return;
+  if (!member) return { sharingEnabled: false };
 
-  member.sharing_enabled = params.sharingEnabled;
+  const nextSharing = typeof params.sharingEnabled === 'boolean' ? params.sharingEnabled : member.sharing_enabled;
+  member.sharing_enabled = nextSharing;
   member.last_seen_at = now;
 
   const existingLoc = store.locations.find((l) => l.member_id === params.memberId);
-  if (!params.sharingEnabled) {
+  if (!nextSharing) {
     if (existingLoc) {
       existingLoc.sharing_status = 'disabled';
+      existingLoc.captured_at = now;
       existingLoc.updated_at = now;
     }
-    writeLocalStore(store);
-    return;
+    await writeStore(store);
+    return { sharingEnabled: false };
   }
 
   // Preserve an honest unavailable state when the browser cannot provide GPS.
   if (params.statusOverride === 'unavailable' && existingLoc) {
     existingLoc.sharing_status = 'unavailable';
+    existingLoc.captured_at = now;
     existingLoc.updated_at = now;
-    writeLocalStore(store);
-    return;
+    await writeStore(store);
+    return { sharingEnabled: true };
   }
 
   // Reject invalid GPS coordinates outside [-90..90] / [-180..180]
@@ -1395,6 +1600,7 @@ export async function updateTouristLocationOrSharing(params: {
       existingLoc.longitude = params.longitude;
       existingLoc.accuracy = params.accuracy ?? 15;
       existingLoc.sharing_status = params.statusOverride || 'sharing';
+      existingLoc.captured_at = now;
       existingLoc.updated_at = now;
     } else {
       store.locations.push({
@@ -1404,11 +1610,13 @@ export async function updateTouristLocationOrSharing(params: {
         longitude: params.longitude,
         accuracy: params.accuracy ?? 15,
         sharing_status: params.statusOverride || 'sharing',
+        captured_at: now,
         updated_at: now
       });
     }
   }
-  writeLocalStore(store);
+  await writeStore(store);
+  return { sharingEnabled: nextSharing };
 }
 
 export async function createEmergencyAlert(params: {
@@ -1423,7 +1631,7 @@ export async function createEmergencyAlert(params: {
   accuracy?: number | null;
 }): Promise<EmergencyAlert> {
   const now = new Date().toISOString();
-  const store = readLocalStore();
+  const store = await readStore();
   const member = store.trip_members.find((m) => m.id === params.memberId);
   const roster = member?.roster_id
     ? store.passenger_roster.find((r) => r.id === member.roster_id)
@@ -1452,17 +1660,22 @@ export async function createEmergencyAlert(params: {
     params.priority ||
     (category === 'Medical assistance' || category === 'Accident / injury' ? 'Critical' : 'High');
 
+  const touristNote = params.note || '';
+  const hydratedMessage = `${category}${touristNote ? ': ' + touristNote : ''}`;
+
   const newAlert: EmergencyAlert = {
     id: crypto.randomUUID(),
     trip_id: params.tripId,
     member_id: params.memberId,
     tourist_code: member?.tourist_code || 'LTT-000',
     passenger_name: params.passengerName,
+    display_name: params.passengerName,
     subgroup_name: member?.subgroup_name || 'Main Group',
     contact_details: contactDetails,
     category,
     priority,
-    note: params.note || category,
+    message: hydratedMessage,
+    note: touristNote,
     latitude: lat,
     longitude: lng,
     accuracy: acc,
@@ -1473,10 +1686,9 @@ export async function createEmergencyAlert(params: {
     messages: [
       {
         id: crypto.randomUUID(),
-        request_id: 'init',
         sender_name: params.passengerName,
         sender_role: 'tourist',
-        message: `${category}${params.note ? ': ' + params.note : ''}`,
+        message: hydratedMessage,
         created_at: now
       }
     ],
@@ -1497,7 +1709,7 @@ export async function createEmergencyAlert(params: {
     created_at: now
   });
 
-  writeLocalStore(store);
+  await writeStore(store);
   return newAlert;
 }
 
@@ -1511,7 +1723,7 @@ export async function updateEmergencyAlertStatus(params: {
   actorEmail: string;
 }): Promise<EmergencyAlert | null> {
   const now = new Date().toISOString();
-  const store = readLocalStore();
+  const store = await readStore();
   const alert = store.emergency_alerts.find(
     (a) => a.id === params.alertId && a.trip_id === params.tripId
   );
@@ -1528,7 +1740,7 @@ export async function updateEmergencyAlertStatus(params: {
     alert.resolution_notes = params.resolutionNotes;
   }
 
-  if (params.newStatus === 'acknowledged' || params.newStatus === 'Acknowledged') {
+  if (params.newStatus === 'Acknowledged') {
     alert.acknowledged_at = now;
     alert.acknowledged_by = params.actorEmail;
   } else if (isResolvedStatus(params.newStatus)) {
@@ -1549,7 +1761,7 @@ export async function updateEmergencyAlertStatus(params: {
     created_at: now
   });
 
-  writeLocalStore(store);
+  await writeStore(store);
   return alert;
 }
 
@@ -1557,11 +1769,11 @@ export async function addAssistanceMessage(params: {
   tripId: string;
   alertId: string;
   senderName: string;
-  senderRole: 'tourist' | 'organizer' | 'responder';
+  senderRole: 'tourist' | 'admin' | 'organizer' | 'responder';
   message: string;
 }) {
   const now = new Date().toISOString();
-  const store = readLocalStore();
+  const store = await readStore();
   const alert = store.emergency_alerts.find(
     (a) => a.id === params.alertId && a.trip_id === params.tripId
   );
@@ -1569,20 +1781,19 @@ export async function addAssistanceMessage(params: {
   if (!alert.messages) alert.messages = [];
   alert.messages.push({
     id: crypto.randomUUID(),
-    request_id: alert.id,
     sender_name: params.senderName,
     sender_role: params.senderRole,
     message: params.message.trim(),
     created_at: now
   });
-  writeLocalStore(store);
+  await writeStore(store);
   return alert;
 }
 
 export async function simulateTouristsForTrip(tripId: string, count: number, actorEmail: string) {
   const capped = Math.min(Math.max(1, Math.floor(count)), MAX_PASSENGERS_PER_TRIP);
   const now = new Date().toISOString();
-  const store = readLocalStore();
+  const store = await readStore();
   const trip = store.trips.find((t) => t.id === tripId);
   if (!trip) throw new Error('Trip not found');
   if (trip.id !== SEED_TRIP_ID || !trip.name.includes('(Demo Seed)')) {
@@ -1656,6 +1867,7 @@ export async function simulateTouristsForTrip(tripId: string, count: number, act
       longitude: lng,
       accuracy: 8 + (i % 15),
       sharing_status: !isSharing ? 'disabled' : isOffline ? 'offline' : 'sharing',
+      captured_at: updatedTime,
       updated_at: updatedTime
     });
   }
@@ -1669,7 +1881,7 @@ export async function simulateTouristsForTrip(tripId: string, count: number, act
     created_at: now
   });
 
-  writeLocalStore(store);
+  await writeStore(store);
   return { simulatedCount: capped };
 }
 
@@ -1683,7 +1895,7 @@ export async function addTripItineraryItem(params: {
   instructions: string;
   actorEmail: string;
 }) {
-  const store = readLocalStore();
+  const store = await readStore();
   const trip = store.trips.find((t) => t.id === params.tripId);
   if (!trip) throw new Error('Trip not found');
   if (!trip.itinerary) trip.itinerary = [];
@@ -1703,12 +1915,12 @@ export async function addTripItineraryItem(params: {
     details: { title: params.title },
     created_at: new Date().toISOString()
   });
-  writeLocalStore(store);
+  await writeStore(store);
   return trip.itinerary;
 }
 
 export async function deleteTripItineraryItem(tripId: string, itemId: string, actorEmail: string) {
-  const store = readLocalStore();
+  const store = await readStore();
   const trip = store.trips.find((t) => t.id === tripId);
   if (!trip || !trip.itinerary) return [];
   trip.itinerary = trip.itinerary.filter((i) => i.id !== itemId);
@@ -1720,7 +1932,7 @@ export async function deleteTripItineraryItem(tripId: string, itemId: string, ac
     details: { itemId },
     created_at: new Date().toISOString()
   });
-  writeLocalStore(store);
+  await writeStore(store);
   return trip.itinerary;
 }
 
@@ -1730,31 +1942,93 @@ export async function sendGroupChatMessage(params: {
   senderId: string;
   senderName: string;
   senderCode?: string;
-  senderRole: 'tourist' | 'organizer' | 'responder';
+  senderRole: 'tourist' | 'organizer' | 'responder' | 'admin';
   message: string;
+  replyToId?: string | null;
+  replyToPreview?: string | null;
   latitude?: number | null;
   longitude?: number | null;
   isUrgent?: boolean;
 }): Promise<GroupChatMessage> {
   const now = new Date().toISOString();
-  const store = readLocalStore();
+  const store = await readStore();
   if (!store.group_messages) store.group_messages = [];
   const msg: GroupChatMessage = {
     id: crypto.randomUUID(),
     trip_id: params.tripId,
     sender_id: params.senderId,
     sender_name: params.senderName,
-    sender_code: params.senderCode,
-    sender_role: params.senderRole,
+    sender_code: params.senderCode || 'TB',
+    sender_role: params.senderRole === 'organizer' || params.senderRole === 'responder' ? 'admin' : params.senderRole,
     message: params.message.trim(),
+    reply_to_id: params.replyToId || null,
+    reply_to_preview: params.replyToPreview || null,
+    reactions: [],
+    is_pinned: false,
     latitude: typeof params.latitude === 'number' ? params.latitude : null,
     longitude: typeof params.longitude === 'number' ? params.longitude : null,
-    is_urgent: Boolean(params.isUrgent),
     created_at: now
   };
   store.group_messages.push(msg);
-  writeLocalStore(store);
+  await writeStore(store);
   return msg;
+}
+
+export async function operateLocalGroupChat(params: {
+  tripId: string;
+  senderId: string;
+  isAdmin: boolean;
+  op: 'react' | 'pin' | 'edit' | 'delete';
+  messageId: string;
+  emoji?: string;
+  message?: string;
+}) {
+  const store = await readStore();
+  if (!store.group_messages) store.group_messages = [];
+  const target = store.group_messages.find((m) => m.id === params.messageId && m.trip_id === params.tripId);
+  if (!target) return null;
+
+  if (params.op === 'react' && params.emoji) {
+    const reactions = Array.isArray(target.reactions) ? [...target.reactions] : [];
+    const existing = reactions.find((r) => r.emoji === params.emoji);
+    if (existing) {
+      if (existing.member_ids.includes(params.senderId)) {
+        existing.member_ids = existing.member_ids.filter((id) => id !== params.senderId);
+      } else {
+        existing.member_ids.push(params.senderId);
+      }
+    } else {
+      reactions.push({ emoji: params.emoji, member_ids: [params.senderId] });
+    }
+    target.reactions = reactions.filter((r) => r.member_ids.length > 0);
+    await writeStore(store);
+    return { reactions: target.reactions };
+  }
+
+  if (params.op === 'pin' && params.isAdmin) {
+    target.is_pinned = !target.is_pinned;
+    await writeStore(store);
+    return { is_pinned: target.is_pinned };
+  }
+
+  if (params.op === 'edit' && params.message) {
+    if (target.sender_id === params.senderId || params.isAdmin) {
+      target.message = params.message.trim();
+      target.edited_at = new Date().toISOString();
+      await writeStore(store);
+    }
+    return { edited: true };
+  }
+
+  if (params.op === 'delete') {
+    if (target.sender_id === params.senderId || params.isAdmin) {
+      store.group_messages = store.group_messages.filter((m) => m.id !== params.messageId);
+      await writeStore(store);
+    }
+    return { deleted: true };
+  }
+
+  return null;
 }
 
 export async function updateTripEssentials(params: {
@@ -1762,7 +2036,7 @@ export async function updateTripEssentials(params: {
   essentials: TripEssentialHub;
   actorEmail: string;
 }) {
-  const store = readLocalStore();
+  const store = await readStore();
   const trip = store.trips.find((t) => t.id === params.tripId);
   if (!trip) throw new Error('Trip not found');
   trip.essentials = params.essentials;
@@ -1774,6 +2048,147 @@ export async function updateTripEssentials(params: {
     details: { hotel: params.essentials.hotel_name, airport: params.essentials.airport_name },
     created_at: new Date().toISOString()
   });
-  writeLocalStore(store);
+  await writeStore(store);
   return trip.essentials;
+}
+
+export async function getRunningActiveTrip() {
+  const store = await readStore();
+  const trip = store.trips.find((t) => t.status === 'active') || store.trips.find((t) => t.status === 'upcoming') || null;
+  if (!trip) return null;
+  const invite = store.trip_invites.find((i) => i.trip_id === trip.id && !i.is_revoked);
+  return {
+    id: trip.id,
+    name: trip.name,
+    destination: trip.destination,
+    start_date: trip.start_date,
+    end_date: trip.end_date,
+    inviteToken: invite?.token || ''
+  };
+}
+
+export async function smartVerifyLocalTourist(params: {
+  inviteToken?: string;
+  selectedTripId?: string;
+  fullName: string;
+  identifier: string;
+  consentGranted?: boolean;
+}) {
+  const store = await readStore();
+  const normName = normalizePassengerName(params.fullName);
+  const rawId = (params.identifier || '').trim();
+  const normPassport = normalizePassportNumber(rawId);
+  const normPhone = normalizePhoneNumber(rawId);
+
+  if (!normName || (!normPassport && !normPhone)) {
+    return { ok: false as const, status: 400, error: 'Please enter your name and either your passport or mobile number.' };
+  }
+
+  let targetTripId = params.selectedTripId || '';
+  if (!targetTripId && params.inviteToken) {
+    const inv = store.trip_invites.find(
+      (i) => i.token === params.inviteToken || i.invitation_code?.toLowerCase() === params.inviteToken?.toLowerCase()
+    );
+    if (!inv || inv.is_revoked || new Date(inv.expires_at).getTime() < Date.now()) {
+      return { ok: false as const, status: 403, error: 'This invitation link is invalid, revoked, or expired.' };
+    }
+    targetTripId = inv.trip_id;
+  }
+
+  const activeTrips = store.trips.filter((t) => t.status === 'active' || t.status === 'upcoming');
+  const activeIds = new Set(activeTrips.map((t) => t.id));
+
+  const matches = store.passenger_roster.filter((r) => {
+    if (!activeIds.has(r.trip_id)) return false;
+    const nameMatch = r.normalized_name.includes(normName) || normName.includes(r.normalized_name);
+    if (!nameMatch) return false;
+    const pHash = normPassport ? hashSensitiveIdentifier(r.trip_id, normPassport) : '';
+    const cHash = normPhone ? hashSensitiveIdentifier(r.trip_id, normPhone) : '';
+    return (pHash && r.passport_hash === pHash) || (cHash && r.contact_hash === cHash);
+  });
+
+  if (matches.length === 0) {
+    return {
+      ok: false as const,
+      status: 403,
+      error: 'No matching passenger record found. Please check your name, mobile number, or passport number.'
+    };
+  }
+
+  const inTarget = targetTripId ? matches.filter((m) => m.trip_id === targetTripId) : matches;
+  const autoSwitched = Boolean(targetTripId && inTarget.length === 0 && matches.length > 0);
+  const scopedMatches = inTarget.length > 0 ? inTarget : matches;
+
+  if (scopedMatches.length > 1) {
+    return {
+      ok: false as const,
+      status: 300,
+      ambiguous: true,
+      candidates: scopedMatches.map((m) => ({
+        tripId: m.trip_id,
+        tripName: activeTrips.find((t) => t.id === m.trip_id)?.name || 'Tour',
+        subgroup: m.subgroup_name,
+        maskedName: m.full_name_display
+      })),
+      error: 'Multiple passenger records matched. Please enter your full name and exact phone or passport.'
+    };
+  }
+
+  const matchedRoster = scopedMatches[0];
+  const matchedTrip = activeTrips.find((t) => t.id === matchedRoster.trip_id)!;
+  const now = new Date().toISOString();
+  const rawSessionId = crypto.randomUUID();
+  const sessionHash = hashSessionToken(rawSessionId);
+
+  let member = matchedRoster.claimed_member_id
+    ? store.trip_members.find((m) => m.id === matchedRoster.claimed_member_id)
+    : undefined;
+
+  if (member) {
+    member.session_token_hash = sessionHash;
+    member.session_revoked = false;
+    member.last_seen_at = now;
+  } else {
+    const memberId = crypto.randomUUID();
+    const touristCode = `LTT-${String(matchedRoster.serial_no).padStart(3, '0')}`;
+    member = {
+      id: memberId,
+      trip_id: matchedTrip.id,
+      roster_id: matchedRoster.id,
+      tourist_code: touristCode,
+      display_name: matchedRoster.full_name_display,
+      subgroup_name: matchedRoster.subgroup_name || 'Main Group',
+      contact_info: matchedRoster.contact_number_admin,
+      passport_masked: matchedRoster.passport_masked,
+      sharing_enabled: params.consentGranted === true,
+      session_token_hash: sessionHash,
+      session_revoked: false,
+      joined_at: now,
+      last_seen_at: now
+    };
+    store.trip_members.push(member);
+    matchedRoster.is_claimed = true;
+    matchedRoster.claimed_member_id = memberId;
+    matchedRoster.claimed_at = now;
+  }
+
+  store.audit_logs.unshift({
+    id: crypto.randomUUID(),
+    trip_id: matchedTrip.id,
+    actor_label: `${member.display_name} (${member.tourist_code})`,
+    action: 'PASSENGER_LOGIN',
+    details: { auto_switched: autoSwitched },
+    created_at: now
+  });
+
+  await writeStore(store);
+  return {
+    ok: true as const,
+    status: 200,
+    sessionId: rawSessionId,
+    tripId: matchedTrip.id,
+    tripName: matchedTrip.name,
+    autoSwitched,
+    member
+  };
 }

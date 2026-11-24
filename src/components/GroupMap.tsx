@@ -58,7 +58,7 @@ function getInitials(name: string): string {
   return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
 }
 
-export default function GroupMap({
+export function GroupMap({
   members,
   meetingPoints = [],
   essentials,
@@ -85,7 +85,7 @@ export default function GroupMap({
 
   const [clusterEnabled, setClusterEnabled] = useState(false); // Default unclustered so individual pins are immediately clickable
   const [showGeofences, setShowGeofences] = useState(true);
-  const [mapStyle, setMapStyle] = useState<'street' | 'satellite'>('satellite');
+  const [mapStyle, setMapStyle] = useState<'street' | 'satellite'>('street');
   const [initialFitDone, setInitialFitDone] = useState(false);
 
   // Side List & Selected Tourist Inspector State
@@ -94,7 +94,7 @@ export default function GroupMap({
 
   const streetTileUrl =
     process.env.NEXT_PUBLIC_MAP_TILE_URL ||
-    'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png';
+    'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}';
   const satelliteTileUrl =
     'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
 
@@ -133,13 +133,9 @@ export default function GroupMap({
         zoomControl: true
       });
 
-      const baseTile = L.tileLayer(satelliteTileUrl, {
-        attribution: 'Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics',
+      const baseTile = L.tileLayer(streetTileUrl, {
+        attribution: process.env.NEXT_PUBLIC_MAP_ATTRIBUTION || 'Tiles &copy; Esri',
         maxZoom: 19
-      }).addTo(map);
-      L.tileLayer('https://{s}.basemaps.cartocdn.com/light_only_labels/{z}/{x}/{y}{r}.png', {
-        maxZoom: 19,
-        opacity: 0.9
       }).addTo(map);
 
       const mpLayer = L.layerGroup().addTo(map);
@@ -165,7 +161,7 @@ export default function GroupMap({
         routeLayerRef.current = null;
       }
     };
-  }, [satelliteTileUrl]);
+  }, [streetTileUrl]);
 
   // Switch between Satellite and Street Tiles
   useEffect(() => {
@@ -181,7 +177,7 @@ export default function GroupMap({
       attribution:
         mapStyle === 'satellite'
           ? 'Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics'
-          : '&copy; OpenStreetMap contributors &copy; CARTO',
+          : (process.env.NEXT_PUBLIC_MAP_ATTRIBUTION || 'Tiles &copy; Esri &mdash; Source: Esri, DeLorme, NAVTEQ, USGS, Intermap, iPC, NRCAN, Esri Japan, METI, Esri China (Hong Kong), Esri (Thailand), TomTom'),
       maxZoom: 19
     }).addTo(map);
   }, [mapStyle, streetTileUrl, satelliteTileUrl]);
@@ -752,3 +748,5 @@ export default function GroupMap({
     </div>
   );
 }
+
+export default GroupMap;

@@ -31,3 +31,7 @@ export default function BrandIdentity({
     </span>
   );
 }
+
+export function BrandLogoMark() {
+  return <BrandIdentity variant="light" compact />;
+}

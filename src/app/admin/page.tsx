@@ -434,14 +434,30 @@ export default function AdminDashboardPage() {
                   )}
                 </div>
 
-                <div className="pt-3 border-t border-slate-100 flex items-center justify-between">
+                <div className="pt-3 border-t border-slate-100 flex items-center gap-2">
                   <Link
                     href={`/admin/trips/${trip.id}`}
-                    className="w-full bg-brand-600 hover:bg-brand-700 text-white text-xs font-semibold py-2.5 px-4 rounded-xl flex items-center justify-center gap-1.5"
+                    className="flex-1 bg-brand-600 hover:bg-brand-700 text-white text-xs font-semibold py-2.5 px-4 rounded-xl flex items-center justify-center gap-1.5"
                   >
                     Manage Trip, Roster, Map &amp; Invites
                     <ArrowRight className="w-4 h-4" />
                   </Link>
+                  {(trip.status === 'completed' || trip.status === 'archived' || trip.status === 'cancelled') && (
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        await fetch(`/api/admin/trips/${trip.id}`, {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ action: 'revive_trip' })
+                        });
+                        fetchDashboard();
+                      }}
+                      className="bg-amber-500 hover:bg-amber-600 text-white text-xs font-bold py-2.5 px-3 rounded-xl shrink-0"
+                    >
+                      Revive Tour
+                    </button>
+                  )}
                 </div>
               </div>
             ))}
@@ -455,7 +471,7 @@ export default function AdminDashboardPage() {
           <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-xl border border-slate-200">
             <h2 className="text-base font-bold text-slate-900 mb-1">Create New Trip</h2>
             <p className="text-xs text-slate-500 mb-4">
-              Configure trip details and passenger capacity (maximum 500 passengers per trip).
+              Configure trip details and passenger capacity (maximum 200 passengers per trip).
             </p>
 
             {createError && (
@@ -515,7 +531,7 @@ export default function AdminDashboardPage() {
 
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Maximum Passengers (1–500 hard limit)
+                  Maximum Passengers (1–{MAX_PASSENGERS_PER_TRIP} hard limit)
                 </label>
                 <input
                   type="number"

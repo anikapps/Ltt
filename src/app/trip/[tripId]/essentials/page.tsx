@@ -1,284 +1,315 @@
 'use client';
 
 import React, { useEffect, useState } from 'react';
-import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
+import Link from 'next/link';
 import {
+  Bell,
   Building2,
-  Plane,
-  Phone,
-  Navigation,
-  ShieldAlert,
   Calendar,
-  MessageSquare,
+  CheckSquare,
+  LogOut,
   MapPin,
-  ShieldCheck,
-  Clock3,
-  ArrowUpRight
+  Navigation,
+  Phone,
+  Plane,
+  ShieldAlert
 } from 'lucide-react';
-import RealQrCode from '@/components/RealQrCode';
-import MinimalNav from '@/components/MinimalNav';
-import { SafeTouristPeer, ItineraryItem, TripEssentialHub } from '@/types/lttbd';
-import { buildGoogleMapsDirectionsUrl } from '@/lib/geo';
+import { MinimalNav } from '@/components/MinimalNav';
+import type { AnnouncementItem, TripEssentialHub } from '@/types/lttbd';
 
-interface EssentialsResponse {
+interface EssentialsState {
   trip: {
     id: string;
     name: string;
     destination: string;
     start_date: string;
     end_date: string;
-    organizer_contact?: string;
-    itinerary?: ItineraryItem[];
+    organizer_contact: string;
     essentials?: TripEssentialHub;
   };
-  me: SafeTouristPeer | null;
+  me: {
+    id: string;
+    tourist_code: string;
+    display_name: string;
+    subgroup_name: string;
+  };
+  announcements: AnnouncementItem[];
 }
 
-function phoneHref(value?: string | null): string | null {
-  const cleaned = (value || '').trim();
-  if (!cleaned || /[^\d+\s().-]/.test(cleaned)) return null;
-  const dialable = cleaned.replace(/[^\d+]/g, '');
-  return dialable.replace(/\D/g, '').length >= 5 ? `tel:${dialable}` : null;
-}
-
-function validCoordinates(lat: number, lng: number): boolean {
-  return Number.isFinite(lat) && Number.isFinite(lng) &&
-    lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180 &&
-    (lat !== 0 || lng !== 0);
-}
-
-export default function TouristEssentialsPage() {
+export default function TripEssentialsPage() {
   const params = useParams<{ tripId: string }>();
   const router = useRouter();
   const tripId = params.tripId;
-  const [state, setState] = useState<EssentialsResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState('');
+
+  const [data, setData] = useState<EssentialsState | null>(null);
+  const [checkedIds, setCheckedIds] = useState<string[]>([]);
+  const [loggingOut, setLoggingOut] = useState(false);
 
   useEffect(() => {
-    let active = true;
+    const saved = localStorage.getItem(`lttbd_checklist_${tripId}`);
+    if (saved) {
+      try {
+        setCheckedIds(JSON.parse(saved));
+      } catch {}
+    }
+
     fetch(`/api/tourist/trip/${tripId}`)
-      .then(async (res) => {
-        if (res.status === 401) {
-          router.push('/');
-          return null;
+      .then(async (r) => {
+        if (r.status === 401) {
+          router.push('/join');
+          return;
         }
-        if (!res.ok) throw new Error('Trip information could not be loaded.');
-        return res.json();
+        if (r.ok) {
+          const json = await r.json();
+          setData(json);
+          localStorage.setItem(`lttbd_essentials_cache_${tripId}`, JSON.stringify(json));
+        }
       })
-      .then((data) => {
-        if (active && data) setState(data as EssentialsResponse);
-      })
-      .catch((error: unknown) => {
-        if (active) setLoadError(error instanceof Error ? error.message : 'Unable to load trip details.');
-      })
-      .finally(() => {
-        if (active) setLoading(false);
+      .catch(() => {
+        const cached = localStorage.getItem(`lttbd_essentials_cache_${tripId}`);
+        if (cached) {
+          try {
+            setData(JSON.parse(cached));
+          } catch {}
+        }
       });
-    return () => { active = false; };
   }, [tripId, router]);
 
-  if (loading) {
+  function toggleChecklist(id: string) {
+    setCheckedIds((prev) => {
+      const next = prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id];
+      localStorage.setItem(`lttbd_checklist_${tripId}`, JSON.stringify(next));
+      return next;
+    });
+  }
+
+  async function handleLogout() {
+    setLoggingOut(true);
+    try {
+      await fetch(`/api/tourist/trip/${tripId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'logout_tourist' })
+      });
+      localStorage.setItem('lttbd_loc_pref', 'disabled');
+      router.push('/join');
+    } finally {
+      setLoggingOut(false);
+    }
+  }
+
+  if (!data) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-slate-50 p-6 text-sm text-slate-500">
-        Loading your trip essentials…
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center text-sm text-slate-600">
+        Loading Trip Essentials...
       </div>
     );
   }
 
-  if (!state) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-slate-50 p-6">
-        <div className="w-full max-w-md rounded-3xl border border-slate-200 bg-white p-7 text-center shadow-sm">
-          <ShieldAlert className="mx-auto mb-3 h-9 w-9 text-rose-500" />
-          <h1 className="text-lg font-bold text-slate-900">Trip details unavailable</h1>
-          <p className="mt-2 text-sm text-slate-600">{loadError || 'Please sign in to your trip again.'}</p>
-          <Link href="/" className="mt-5 inline-flex rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white">Return to home</Link>
-        </div>
-      </div>
-    );
-  }
+  const firstName = data.me.display_name.split(' ')[0] || 'Traveller';
+  const ess = data.trip.essentials;
+  const latestAnn = data.announcements[0];
+  const flights = ess?.flights || [];
+  const checklist = ess?.checklist || [
+    { id: 'c1', label: 'Passport & visa copy', category: 'Documents' as const, required: true },
+    { id: 'c2', label: 'Hotel voucher & flight ticket', category: 'Documents' as const, required: true },
+    { id: 'c3', label: 'Power bank & adapter', category: 'Packing' as const, required: false }
+  ];
 
-  const { trip, me } = state;
-  const essentials: TripEssentialHub = trip.essentials || {
-    hotel_name: '', hotel_address: '', hotel_phone: '', hotel_lat: 0, hotel_lng: 0,
-    airport_name: '', airport_terminal: '', airport_lat: 0, airport_lng: 0,
-    organizer_name: 'Tour Leader & Operations', organizer_phone: trip.organizer_contact || '',
-    local_emergency_police: '', local_emergency_medical: '',
-    embassy_name: '', embassy_phone: ''
-  };
-
-  const organizerPhone = essentials.organizer_phone || trip.organizer_contact || '';
-  const organizerHref = phoneHref(organizerPhone);
-  const policeHref = phoneHref(essentials.local_emergency_police);
-  const medicalHref = phoneHref(essentials.local_emergency_medical);
-  const embassyHref = phoneHref(essentials.embassy_phone);
-  const hotelHref = phoneHref(essentials.hotel_phone);
-  const hotelReady = Boolean(essentials.hotel_name.trim()) && validCoordinates(essentials.hotel_lat, essentials.hotel_lng);
-  const airportReady = Boolean(essentials.airport_name.trim()) && validCoordinates(essentials.airport_lat, essentials.airport_lng);
-
-  const hotelDirectionsUrl = hotelReady ? buildGoogleMapsDirectionsUrl({
-    originLat: me?.latitude,
-    originLng: me?.longitude,
-    destLat: essentials.hotel_lat,
-    destLng: essentials.hotel_lng,
-    travelMode: 'driving'
-  }) : null;
-  const airportDirectionsUrl = airportReady ? buildGoogleMapsDirectionsUrl({
-    originLat: me?.latitude,
-    originLng: me?.longitude,
-    destLat: essentials.airport_lat,
-    destLng: essentials.airport_lng,
-    travelMode: 'driving'
-  }) : null;
-
-  const qrIdentityPayload = typeof window !== 'undefined'
-    ? `${window.location.origin}/trip/${trip.id}?tourist=${encodeURIComponent(me?.tourist_code || '')}`
-    : `LTTBD:${trip.id}:${me?.tourist_code || ''}`;
-
-  const contactCardClass = 'flex min-h-36 flex-col justify-between gap-3 rounded-2xl border border-white/15 bg-white/[0.08] p-4 backdrop-blur transition hover:bg-white/[0.12]';
+  const hotelDirections =
+    typeof ess?.hotel_lat === 'number' && typeof ess?.hotel_lng === 'number'
+      ? `https://www.google.com/maps/dir/?api=1&destination=${ess.hotel_lat},${ess.hotel_lng}&travelmode=driving`
+      : ess?.hotel_name
+      ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${ess.hotel_name} ${ess.hotel_address || data.trip.destination}`)}`
+      : null;
 
   return (
-    <div className="ltt-essentials-page flex min-h-screen flex-col bg-slate-50">
+    <div className="min-h-screen bg-slate-50 flex flex-col">
       <MinimalNav
+        role="tourist"
         tripId={tripId}
-        tripName={trip.name}
-        touristLabel={`${trip.destination} • Trip essentials`}
+        tripName={data.trip.name}
+        userName={`${data.me.display_name} (${data.me.tourist_code})`}
       />
 
-      <main className="mx-auto w-full max-w-6xl space-y-7 px-4 py-6 sm:px-6 sm:py-8">
-        <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-          <div>
-            <div className="mb-2 inline-flex items-center gap-2 rounded-full border border-blue-100 bg-blue-50 px-3 py-1 text-[11px] font-bold uppercase tracking-wide text-blue-800">
-              <ShieldCheck className="h-3.5 w-3.5" /> Your travel information
-            </div>
-            <h1 className="text-2xl font-bold tracking-tight text-slate-950 sm:text-3xl">Trip essentials</h1>
-            <p className="mt-1 text-sm text-slate-600">Important contacts, accommodation, airport details and your digital trip ID.</p>
-          </div>
-          <Link href={`/trip/${tripId}/chat`} className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-blue-200 hover:text-blue-800">
-            <MessageSquare className="h-4 w-4" /> Contact the tour team
-          </Link>
-        </header>
-
-        <section className="overflow-hidden rounded-[28px] bg-gradient-to-br from-slate-950 via-blue-950 to-blue-900 p-5 text-white shadow-xl sm:p-7">
-          <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-2 text-sm font-semibold">
-              <ShieldAlert className="h-5 w-5 text-amber-300" /> Support & emergency contacts
-            </div>
-            <span className="rounded-full border border-white/15 bg-white/10 px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-blue-100">Destination-specific information</span>
-          </div>
-
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-            <div className={contactCardClass}>
-              <div>
-                <p className="text-[10px] font-bold uppercase tracking-widest text-blue-200">Tour leader & operations</p>
-                <p className="mt-2 text-base font-bold">{essentials.organizer_name || 'Tour support team'}</p>
-                <p className="mt-1 text-xs text-blue-100/80">Your primary point of contact during the trip.</p>
-              </div>
-              {organizerHref ? <a href={organizerHref} className="inline-flex w-fit items-center gap-2 text-sm font-semibold text-cyan-200 hover:text-white"><Phone className="h-4 w-4" /> {organizerPhone} <ArrowUpRight className="h-3.5 w-3.5" /></a> : <span className="text-xs text-blue-100/70">Number not added — use the trip chat.</span>}
-            </div>
-
-            <div className={contactCardClass}>
-              <div>
-                <p className="text-[10px] font-bold uppercase tracking-widest text-blue-200">Local emergency services</p>
-                <p className="mt-2 text-base font-bold">Police & medical assistance</p>
-                <p className="mt-1 text-xs text-blue-100/80">Use the verified local numbers for this destination.</p>
-              </div>
-              <div className="flex flex-wrap gap-x-4 gap-y-2 text-sm font-semibold text-cyan-200">
-                {policeHref && <a href={policeHref} className="inline-flex items-center gap-1.5"><Phone className="h-3.5 w-3.5" /> Police: {essentials.local_emergency_police}</a>}
-                {medicalHref && <a href={medicalHref} className="inline-flex items-center gap-1.5"><Phone className="h-3.5 w-3.5" /> Medical: {essentials.local_emergency_medical}</a>}
-                {!policeHref && !medicalHref && <span className="text-xs font-normal text-blue-100/70">Local emergency numbers have not been added. Contact local authorities and your tour leader.</span>}
-              </div>
-            </div>
-
-            <div className={contactCardClass}>
-              <div>
-                <p className="text-[10px] font-bold uppercase tracking-widest text-blue-200">Consular assistance</p>
-                <p className="mt-2 text-base font-bold">{essentials.embassy_name || 'Your country’s embassy or consulate'}</p>
-                <p className="mt-1 text-xs text-blue-100/80">For passport and consular support while abroad.</p>
-              </div>
-              {embassyHref ? <a href={embassyHref} className="inline-flex w-fit items-center gap-2 text-sm font-semibold text-cyan-200 hover:text-white"><Phone className="h-4 w-4" /> {essentials.embassy_phone} <ArrowUpRight className="h-3.5 w-3.5" /></a> : <span className="text-xs text-blue-100/70">Contact details have not been added.</span>}
-            </div>
+      <main className="max-w-4xl w-full mx-auto px-4 py-6 space-y-5 flex-1">
+        {/* Greeting Header */}
+        <section className="rounded-3xl bg-gradient-to-br from-slate-900 to-blue-950 text-white p-6 shadow-lg">
+          <div className="text-xs font-bold uppercase tracking-wider text-blue-300">{data.trip.name}</div>
+          <h1 className="text-2xl sm:text-3xl font-extrabold mt-1">Good day, {firstName}!</h1>
+          <p className="text-sm text-blue-100 mt-1">
+            Your Trip Essentials — everything you need for {data.trip.destination} in one place (cached offline).
+          </p>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <Link
+              href={`/trip/${tripId}`}
+              className="inline-flex items-center gap-1.5 rounded-xl bg-white text-slate-900 px-3.5 py-2 text-xs font-bold"
+            >
+              <MapPin className="w-3.5 h-3.5 text-blue-700" /> Back to Live Map
+            </Link>
           </div>
         </section>
 
-        <section className="grid gap-4 lg:grid-cols-2">
-          <article className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
-            <div className="flex items-center justify-between gap-3">
-              <span className="inline-flex items-center gap-2 rounded-full bg-blue-50 px-3 py-1 text-[10px] font-bold uppercase tracking-wide text-blue-800"><Building2 className="h-3.5 w-3.5" /> Group accommodation</span>
-              {hotelReady && <span className="font-mono text-[10px] text-slate-400">{essentials.hotel_lat.toFixed(4)}, {essentials.hotel_lng.toFixed(4)}</span>}
+        {/* Latest Announcement */}
+        {latestAnn && (
+          <section className="rounded-2xl bg-amber-50 border border-amber-200 p-4">
+            <div className="flex items-center gap-2 text-xs font-extrabold uppercase tracking-wider text-amber-800">
+              <Bell className="w-4 h-4" /> Latest announcement · {latestAnn.priority}
             </div>
-            <h2 className="mt-4 text-lg font-bold text-slate-950">{essentials.hotel_name || 'Hotel details not added yet'}</h2>
-            <p className="mt-1 min-h-10 text-sm leading-relaxed text-slate-600">{essentials.hotel_address || 'Your tour organizer will add the confirmed hotel name and address here.'}</p>
-            <div className="mt-5 flex flex-wrap gap-2 border-t border-slate-100 pt-4">
-              {hotelDirectionsUrl ? <a href={hotelDirectionsUrl} target="_blank" rel="noopener noreferrer" className="inline-flex flex-1 items-center justify-center gap-2 rounded-xl bg-blue-700 px-3 py-2.5 text-xs font-bold text-white transition hover:bg-blue-800"><Navigation className="h-4 w-4" /> Directions</a> : <span className="flex-1 rounded-xl bg-slate-100 px-3 py-2.5 text-center text-xs text-slate-500">Map location pending</span>}
-              {hotelHref ? <a href={hotelHref} className="inline-flex items-center justify-center gap-2 rounded-xl bg-slate-100 px-3 py-2.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-200"><Phone className="h-4 w-4" /> Call hotel</a> : <span className="rounded-xl bg-slate-50 px-3 py-2.5 text-xs text-slate-400">No hotel phone</span>}
+            <div className="text-base font-bold text-slate-900 mt-1">{latestAnn.title}</div>
+            <p className="text-sm text-slate-700 mt-0.5">{latestAnn.body}</p>
+            <div className="text-[11px] text-slate-500 mt-2">
+              From {latestAnn.created_by} · {new Date(latestAnn.created_at).toLocaleString()}
             </div>
-          </article>
+          </section>
+        )}
 
-          <article className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
-            <div className="flex items-center justify-between gap-3">
-              <span className="inline-flex items-center gap-2 rounded-full bg-sky-50 px-3 py-1 text-[10px] font-bold uppercase tracking-wide text-sky-800"><Plane className="h-3.5 w-3.5" /> Airport information</span>
-              {airportReady && <span className="font-mono text-[10px] text-slate-400">{essentials.airport_lat.toFixed(4)}, {essentials.airport_lng.toFixed(4)}</span>}
+        {/* 4 Essential Cards: Hotels, Flights, Contacts, Checklist */}
+        <div className="grid sm:grid-cols-2 gap-4">
+          {/* Hotels */}
+          <section className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+            <h2 className="text-sm font-extrabold text-slate-900 flex items-center gap-2">
+              <Building2 className="w-4 h-4 text-blue-700" /> Hotels &amp; Accommodation
+            </h2>
+            <div className="mt-3 text-sm font-bold text-slate-900">{ess?.hotel_name || 'Hotel details pending'}</div>
+            <div className="text-xs text-slate-600 mt-0.5">{ess?.hotel_address || 'Address will appear once confirmed.'}</div>
+            <div className="mt-4 flex flex-wrap gap-2">
+              {hotelDirections && (
+                <a
+                  href={hotelDirections}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-blue-700 text-white px-3.5 py-2 text-xs font-bold"
+                >
+                  <Navigation className="w-3.5 h-3.5" /> Directions
+                </a>
+              )}
+              {ess?.hotel_phone && (
+                <a
+                  href={`tel:${ess.hotel_phone}`}
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-slate-100 text-slate-800 px-3.5 py-2 text-xs font-semibold"
+                >
+                  <Phone className="w-3.5 h-3.5" /> {ess.hotel_phone}
+                </a>
+              )}
             </div>
-            <h2 className="mt-4 text-lg font-bold text-slate-950">{essentials.airport_name || 'Airport details not added yet'}</h2>
-            <p className="mt-1 min-h-10 text-sm leading-relaxed text-slate-600">{essentials.airport_terminal || 'Terminal, meeting location and departure instructions will appear here once confirmed.'}</p>
-            <div className="mt-5 border-t border-slate-100 pt-4">
-              {airportDirectionsUrl ? <a href={airportDirectionsUrl} target="_blank" rel="noopener noreferrer" className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-slate-950 px-3 py-2.5 text-xs font-bold text-white transition hover:bg-slate-800"><Navigation className="h-4 w-4" /> Navigate to airport <ArrowUpRight className="h-3.5 w-3.5" /></a> : <div className="rounded-xl bg-slate-100 px-3 py-2.5 text-center text-xs text-slate-500">Airport location pending confirmation by your organizer.</div>}
-            </div>
-          </article>
-        </section>
+          </section>
 
-        <section className="grid items-start gap-4 lg:grid-cols-[minmax(240px,0.8fr)_minmax(0,1.8fr)]">
-          <article className="rounded-3xl border border-slate-200 bg-white p-5 text-center shadow-sm sm:p-6">
-            <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-2xl bg-blue-50 text-blue-700"><ShieldCheck className="h-5 w-5" /></div>
-            <p className="text-[10px] font-bold uppercase tracking-widest text-blue-700">Digital trip ID</p>
-            <h2 className="mt-1 text-base font-bold text-slate-950">Your group pass</h2>
-            <p className="mb-4 mt-1 text-xs text-slate-500">Show this QR code to your tour coordinator when requested.</p>
-            <div className="inline-flex rounded-2xl border border-slate-100 bg-white p-2">
-              <RealQrCode value={qrIdentityPayload} size={176} label={me?.display_name || 'Tourist'} sublabel={`ID: ${me?.tourist_code || 'Pending'} • ${me?.subgroup_name || 'Main Group'}`} />
-            </div>
-            <p className="mt-3 text-xs font-semibold text-slate-700">{me?.display_name || 'Tour participant'}</p>
-            <p className="mt-0.5 text-[10px] text-slate-500">{me?.tourist_code || 'Tourist ID pending'}</p>
-          </article>
-
-          <article className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
-            <div className="mb-4 flex items-center gap-2">
-              <Calendar className="h-5 w-5 text-blue-700" />
-              <div>
-                <h2 className="text-base font-bold text-slate-950">Your tour itinerary</h2>
-                <p className="text-xs text-slate-500">The latest schedule shared by your organizer.</p>
-              </div>
-            </div>
-            {trip.itinerary?.length ? (
-              <div className="space-y-3">
-                {trip.itinerary.map((item) => (
-                  <div key={item.id} className="grid grid-cols-[auto_1fr] gap-3 rounded-2xl border border-slate-100 bg-slate-50/80 p-3.5">
-                    <div className="mt-0.5 flex h-9 w-9 items-center justify-center rounded-xl bg-white text-blue-700 shadow-sm"><Clock3 className="h-4 w-4" /></div>
-                    <div className="min-w-0">
-                      <p className="text-[10px] font-bold uppercase tracking-wide text-blue-700">{item.day_label} · {item.time_label}</p>
-                      <h3 className="mt-1 text-sm font-bold text-slate-900">{item.title}</h3>
-                      {item.location_name && <p className="mt-1 flex items-center gap-1 text-xs text-slate-600"><MapPin className="h-3.5 w-3.5 shrink-0" /> {item.location_name}</p>}
-                      {item.instructions && <p className="mt-1 text-xs leading-relaxed text-slate-500">{item.instructions}</p>}
-                    </div>
+          {/* Flight Details */}
+          <section className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+            <h2 className="text-sm font-extrabold text-slate-900 flex items-center gap-2">
+              <Plane className="w-4 h-4 text-indigo-700" /> Flight &amp; Airport Details
+            </h2>
+            <div className="mt-3 text-sm font-bold text-slate-900">{ess?.airport_name || 'Airport details pending'}</div>
+            <div className="text-xs text-slate-600 mt-0.5">{ess?.airport_terminal || ''}</div>
+            {flights.length > 0 ? (
+              <div className="mt-3 space-y-2">
+                {flights.map((f) => (
+                  <div key={f.id} className="rounded-xl bg-slate-50 p-2.5 text-xs">
+                    <div className="font-bold text-slate-900">{f.airline} {f.flight_number} · {f.route}</div>
+                    <div className="text-slate-600">{f.departure_time} → {f.arrival_time} · Baggage: {f.baggage_allowance}</div>
                   </div>
                 ))}
               </div>
             ) : (
-              <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-5 py-8 text-center">
-                <Calendar className="mx-auto h-7 w-7 text-slate-300" />
-                <p className="mt-2 text-sm font-semibold text-slate-700">Itinerary not published yet</p>
-                <p className="mt-1 text-xs text-slate-500">Your organizer will share the schedule here when it is ready.</p>
-              </div>
+              <div className="mt-2 text-xs text-slate-500">Flight schedule &amp; baggage info will appear here.</div>
             )}
-          </article>
+          </section>
+        </div>
+
+        {/* Daily Itinerary */}
+        <section className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+          <h2 className="text-sm font-extrabold text-slate-900 flex items-center gap-2 mb-3">
+            <Calendar className="w-4 h-4 text-emerald-700" /> Daily Travel Itinerary
+          </h2>
+          {ess?.itinerary && ess.itinerary.length > 0 ? (
+            <div className="space-y-2.5">
+              {ess.itinerary.map((item) => (
+                <div key={item.id} className="rounded-xl border border-slate-100 bg-slate-50/70 p-3 flex flex-wrap justify-between gap-2">
+                  <div>
+                    <div className="text-xs font-bold text-blue-700">{item.day_label} · {item.time_label}</div>
+                    <div className="text-sm font-bold text-slate-900">{item.title}</div>
+                    {item.notes && <div className="text-xs text-slate-600 mt-0.5">{item.notes}</div>}
+                    {!item.notes && item.instructions && <div className="text-xs text-slate-600 mt-0.5">{item.instructions}</div>}
+                  </div>
+                  <div className="text-xs font-semibold text-slate-500">{item.location_name}</div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-xs text-slate-500">No itinerary stops added yet.</p>
+          )}
         </section>
 
-        <footer className="flex flex-col items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-4 text-center sm:flex-row sm:text-left">
-          <p className="text-xs text-slate-500">Trip details are maintained by your organizer. Check the group chat for urgent updates.</p>
-          <Link href={`/trip/${tripId}/chat`} className="inline-flex shrink-0 items-center gap-2 text-xs font-bold text-blue-800 hover:text-blue-950"><MessageSquare className="h-4 w-4" /> Open trip chat</Link>
-        </footer>
+        {/* Travel Checklist */}
+        <section className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+          <h2 className="text-sm font-extrabold text-slate-900 flex items-center gap-2 mb-3">
+            <CheckSquare className="w-4 h-4 text-blue-700" /> Travel Checklist
+          </h2>
+          <div className="space-y-2">
+            {checklist.map((c) => {
+              const done = checkedIds.includes(c.id);
+              return (
+                <label key={c.id} className="flex items-center gap-3 p-2.5 rounded-xl hover:bg-slate-50 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={done}
+                    onChange={() => toggleChecklist(c.id)}
+                    className="rounded border-slate-300 text-blue-700"
+                  />
+                  <span className={`text-sm ${done ? 'line-through text-slate-400' : 'text-slate-800 font-medium'}`}>
+                    {c.label}
+                  </span>
+                  <span className="ml-auto text-[11px] font-semibold text-slate-400">{c.category}</span>
+                </label>
+              );
+            })}
+          </div>
+        </section>
+
+        {/* Emergency & Organizer Contacts */}
+        <section className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+          <h2 className="text-sm font-extrabold text-slate-900 flex items-center gap-2 mb-3">
+            <ShieldAlert className="w-4 h-4 text-rose-600" /> Emergency &amp; Organizer Contacts
+          </h2>
+          <div className="grid sm:grid-cols-3 gap-3 text-xs">
+            <div className="rounded-xl bg-slate-50 p-3">
+              <div className="font-bold text-slate-500 uppercase">Tour Organizer</div>
+              <div className="font-bold text-slate-900 mt-1">{ess?.organizer_hotline || data.trip.organizer_contact || 'Not set'}</div>
+            </div>
+            <div className="rounded-xl bg-slate-50 p-3">
+              <div className="font-bold text-slate-500 uppercase">Local Police / Medical</div>
+              <div className="font-bold text-slate-900 mt-1">
+                {ess?.local_emergency_police || 'N/A'} / {ess?.local_emergency_medical || 'N/A'}
+              </div>
+            </div>
+            <div className="rounded-xl bg-slate-50 p-3">
+              <div className="font-bold text-slate-500 uppercase">{ess?.embassy_name || 'Embassy'}</div>
+              <div className="font-bold text-slate-900 mt-1">{ess?.embassy_phone || 'Not set'}</div>
+            </div>
+          </div>
+        </section>
+
+        {/* Log Out at the Bottom (per spec: revokes session, stops location sharing, preserves remembered login) */}
+        <section className="pt-4 pb-8">
+          <div className="rounded-2xl border border-slate-200 bg-white p-5 flex flex-wrap items-center justify-between gap-4">
+            <div>
+              <div className="text-sm font-bold text-slate-900">Log out</div>
+              <div className="text-xs text-slate-500">
+                Securely leave your trip session and stop location sharing. Your remembered name stays saved if enabled.
+              </div>
+            </div>
+            <button
+              type="button"
+              disabled={loggingOut}
+              onClick={handleLogout}
+              className="inline-flex items-center gap-2 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold px-4 py-2.5 text-xs transition"
+            >
+              <LogOut className="w-4 h-4" /> {loggingOut ? 'Logging out...' : 'Log out'}
+            </button>
+          </div>
+        </section>
       </main>
     </div>
   );
